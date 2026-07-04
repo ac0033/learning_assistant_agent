@@ -1,0 +1,218 @@
+{
+  "timestamp": "2026-07-04T19:38:03.925724",
+  "total": 42,
+  "passed": 42,
+  "failed": 0,
+  "results": [
+    {
+      "name": "config.settings — Settings class",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "config.prompts — all prompt templates",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.utils — retry_async, create_llm",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.agent.state — TeachingState",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.agent.graph — TeachingAgent, build_graph",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.agent.nodes.query_understanding",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.agent.nodes.document_retrieval",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.agent.nodes.explanation_generation",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.agent.nodes.example_generation",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.agent.nodes.math_notation",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.agent.nodes.summary_transition",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.indexing.embeddings — get_embed_model",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.indexing.vector_store — VectorStoreManager",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.indexing.hybrid_retriever — HybridRetriever",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.indexing.reranker — Reranker",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.ingestion.loader — PDFLoader",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.ingestion.chunker — SemanticChunker",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.ingestion.pipeline — IngestionPipeline",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.teaching.methodology — TeachingMethodology",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.ui.chat_handler",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.ui.file_handler",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "src.ui.session_manager",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "settings.anthropic_model = 'deepseek-v4-flash'",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "settings.embedding_provider = 'siliconflow'",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "settings.embedding_model = 'BAAI/bge-m3'",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "settings.anthropic_base_url = 'https://api.deepseek.com/anthropic'",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "settings.validate_runtime() — no exception",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "get_embed_model() creates instance and tests embedding",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "build_graph() compiles without error",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "Graph contains all 6 nodes",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "Graph entry point and exit point correct",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "Graph schema matches TeachingState fields",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "create_llm() creates instance with correct model",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "create_llm(temperature=0.5, max_tokens=3000) honors params",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "VectorStoreManager initialization",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "VectorStoreManager add/list/query round-trip",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "HybridRetriever initialization with BM25 index",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "Reranker rerank returns correct count",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "TeachingMethodology.assemble_full_response includes all 4 parts",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "TeachingMethodology.assemble_full_response skips empty parts",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "TeachingMethodology.assemble_partial_response with None values",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "TeachingMethodology.get_teaching_principles returns non-empty",
+      "status": "PASS",
+      "detail": ""
+    }
+  ]
+}
