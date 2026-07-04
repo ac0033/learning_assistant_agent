@@ -10,7 +10,7 @@ from typing import Any
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from ..state import TeachingState
-from ...utils import retry_async, create_llm, extract_text
+from ...utils import retry_async, create_llm, extract_text, render_prompt
 from config.prompts import TEACHING_SYSTEM_PROMPT, EXAMPLE_GENERATION_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,8 @@ async def example_generation_node(state: TeachingState) -> dict[str, Any]:
 
     llm = create_llm(temperature=0.5, max_tokens=3000)
 
-    prompt = EXAMPLE_GENERATION_PROMPT.format(
+    prompt = render_prompt(
+        EXAMPLE_GENERATION_PROMPT,
         core_explanation=core_explanation,
         user_query=user_query,
     )

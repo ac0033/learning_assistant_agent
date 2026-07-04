@@ -10,7 +10,7 @@ from typing import Any
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from ..state import TeachingState
-from ...utils import retry_async, create_llm, extract_text
+from ...utils import retry_async, create_llm, extract_text, render_prompt
 from config.prompts import TEACHING_SYSTEM_PROMPT, MATH_NOTATION_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,8 @@ async def math_notation_node(state: TeachingState) -> dict[str, Any]:
 
     llm = create_llm(temperature=0.3, max_tokens=3000)
 
-    prompt = MATH_NOTATION_PROMPT.format(
+    prompt = render_prompt(
+        MATH_NOTATION_PROMPT,
         core_explanation=core_explanation,
         examples=examples,
         user_query=user_query,

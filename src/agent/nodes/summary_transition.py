@@ -10,7 +10,7 @@ from typing import Any
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from ..state import TeachingState
-from ...utils import retry_async, create_llm, extract_text
+from ...utils import retry_async, create_llm, extract_text, render_prompt
 from config.prompts import TEACHING_SYSTEM_PROMPT, SUMMARY_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,8 @@ async def summary_transition_node(state: TeachingState) -> dict[str, Any]:
 
     llm = create_llm(temperature=0.5, max_tokens=2000)
 
-    prompt = SUMMARY_PROMPT.format(
+    prompt = render_prompt(
+        SUMMARY_PROMPT,
         core_explanation=core_explanation,
         examples=examples,
         math_notation=math_notation,

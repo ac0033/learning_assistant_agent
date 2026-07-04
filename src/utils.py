@@ -2,9 +2,30 @@
 
 import logging
 import asyncio
+import re
 from typing import Any, Callable, Union
 
 logger = logging.getLogger(__name__)
+
+
+_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def render_prompt(template: str, **kwargs: Any) -> str:
+    """Safely substitute {placeholder} tokens in a prompt template.
+
+    Unlike str.format(), injected values are NOT re-parsed for braces,
+    so LaTeX subscripts like ``X_{ij}`` in retrieved chunks or LLM output
+    do not raise KeyError.
+    """
+
+    def _replace(match: "re.Match[str]") -> str:
+        name = match.group(1)
+        if name in kwargs:
+            return str(kwargs[name])
+        return match.group(0)
+
+    return _PLACEHOLDER_RE.sub(_replace, template)
 
 
 def extract_text(response: Any) -> str:

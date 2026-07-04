@@ -10,7 +10,7 @@ from typing import Any
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from ..state import TeachingState
-from ...utils import retry_async, create_llm, extract_text
+from ...utils import retry_async, create_llm, extract_text, render_prompt
 from config.prompts import (
     TEACHING_SYSTEM_PROMPT,
     EXPLANATION_GENERATION_PROMPT,
@@ -44,14 +44,16 @@ async def explanation_generation_node(state: TeachingState) -> dict[str, Any]:
             for c in retrieved_chunks
         )
 
-        prompt = EXPLANATION_GENERATION_PROMPT.format(
+        prompt = render_prompt(
+            EXPLANATION_GENERATION_PROMPT,
             retrieved_context=context_text,
             target_topic=target_topic,
             user_query=user_query,
         )
     else:
         # No retrieval: direct response
-        prompt = DIRECT_RESPONSE_PROMPT.format(
+        prompt = render_prompt(
+            DIRECT_RESPONSE_PROMPT,
             user_query=user_query,
         )
 
