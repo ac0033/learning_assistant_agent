@@ -113,7 +113,19 @@ class HybridRetriever:
         self._candidate_k = settings.retrieval_candidate_k
         self._final_k = settings.retrieval_top_k
 
-        # Build BM25 index from existing store
+        # One-time cleanup of legacy duplicate chunks (pre-dedup-feature
+        # re-ingestion leaves 8-9x copies of the same content). Runs once
+        # at retriever construction; subsequent uploads are guarded by
+        # VectorStoreManager.add_nodes' own dedup check, so this is a no-op
+        # after the first clean run.
+        try:
+            removed = self._vsm.dedup_by_content()
+            if removed:
+                logger.info("One-time dedup removed %d legacy duplicate chunks", removed)
+        except Exception as e:
+            logger.warning("Startup dedup_by_content failed (continuing): %s", e)
+
+        # Build BM25 index from existing store (post-cleanup, so it's clean)
         self._build_bm25_index()
 
     def _build_bm25_index(self):
@@ -129,11 +141,19 @@ class HybridRetriever:
                 nodes.append(TextNode(text=doc, metadata=meta))
             self._bm25.index(nodes)
 
-    def retrieve(self, query: str) -> List[NodeWithScore]:
+    def retrieve(self, query: str, source_filter: Optional[str] = None,
+                final_k: Optional[int] = None) -> List[NodeWithScore]:
         """Execute hybrid retrieval for a query.
 
         Args:
             query: The search query string.
+            source_filter: If given, restrict retrieval to chunks whose
+                ``metadata['source']`` equals this filename. Used when the
+                student explicitly names a PDF in their query.
+            final_k: Override the default final-k (reranker output size).
+                Pass a larger value when the caller wants a wider candidate
+                pool to apply its own diversity post-selection (e.g. ensuring
+                chunks from multiple sections are represented).
 
         Returns:
             List of NodeWithScore, sorted by relevance (highest first).
@@ -142,33 +162,38 @@ class HybridRetriever:
             logger.warning("BM25 index is empty—returning empty results")
             return []
 
-        # Step 1: Dense retrieval
-        dense_results = self._dense_search(query, top_k=self._candidate_k)
+        dense_where = {"source": source_filter} if source_filter else None
+        out_k = final_k if final_k is not None else self._final_k
 
-        # Step 2: Sparse retrieval
-        sparse_results = self._sparse_search(query, top_k=self._candidate_k)
+        # Step 1: Dense retrieval (with optional metadata filter)
+        dense_results = self._dense_search(query, top_k=self._candidate_k, where=dense_where)
+
+        # Step 2: Sparse retrieval. BM25 keeps an in-memory node list, so we
+        # post-filter its results to the requested source (cheaper than
+        # rebuilding the index per source).
+        sparse_results = self._sparse_search(query, top_k=self._candidate_k, source_filter=source_filter)
 
         # Step 3: RRF fusion
         fused = self._reciprocal_rank_fusion(dense_results, sparse_results, k=60)
 
         # Step 4: Rerank
-        final = self._reranker.rerank(query, fused, top_k=self._final_k)
+        final = self._reranker.rerank(query, fused, top_k=out_k)
 
         logger.info(
-            "Hybrid retrieval: dense=%d, sparse=%d, fused=%d, final=%d",
-            len(dense_results), len(sparse_results), len(fused), len(final)
+            "Hybrid retrieval (source=%s, final_k=%d): dense=%d, sparse=%d, fused=%d, final=%d",
+            source_filter or "ALL", out_k, len(dense_results), len(sparse_results), len(fused), len(final)
         )
 
         return final
 
-    def _dense_search(self, query: str, top_k: int) -> List[NodeWithScore]:
+    def _dense_search(self, query: str, top_k: int, where: Optional[dict] = None) -> List[NodeWithScore]:
         """Vector similarity search. Errors are isolated — returns [] on failure."""
         if self._embed_model is None:
             return []
 
         try:
             query_embedding = self._embed_model.get_query_embedding(query)
-            result = self._vsm.query(query_embedding, top_k=top_k)
+            result = self._vsm.query(query_embedding, top_k=top_k, where=where)
         except Exception as e:
             logger.warning("Dense search failed: %s. Returning empty.", e)
             return []
@@ -179,7 +204,7 @@ class HybridRetriever:
                 nodes.append(NodeWithScore(node=node, score=similarity or 0.0))
         return nodes
 
-    def _sparse_search(self, query: str, top_k: int) -> List[NodeWithScore]:
+    def _sparse_search(self, query: str, top_k: int, source_filter: Optional[str] = None) -> List[NodeWithScore]:
         """BM25 exact/partial match search. Errors are isolated — returns [] on failure."""
         try:
             results = self._bm25.search(query, top_k=top_k)
@@ -190,7 +215,10 @@ class HybridRetriever:
         nodes = []
         for idx, score in results:
             if score > 0:
-                nodes.append(NodeWithScore(node=self._bm25._nodes[idx], score=score))
+                node = self._bm25._nodes[idx]
+                if source_filter and node.metadata.get("source") != source_filter:
+                    continue
+                nodes.append(NodeWithScore(node=node, score=score))
         return nodes
 
     def _reciprocal_rank_fusion(
