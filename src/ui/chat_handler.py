@@ -8,7 +8,9 @@ Key behaviors:
 - Four-part output: sections are rendered as they complete
 - LaTeX: math notation is preserved for Chainlit's LaTeX renderer
 - Sessions: per-user conversation state via SessionManager
-- File uploads: initial upload via cl.AskFileMessage, subsequent via message.elements
+- File uploads: non-blocking — students attach PDFs via the message input's
+  paperclip/drag-drop at any time; processed through message.elements.
+  /history command works without uploading anything first.
 """
 
 import asyncio
@@ -43,9 +45,9 @@ WELCOME_MESSAGE = """# 🎓 开源课程助教 Agent
 - 📝 按四段式结构讲解：**核心流程 → 示例展开 → 数学符号 → 总结提炼**
 
 ### 开始使用
-1. **上传课程 PDF** — 在下方对话框中上传你的课程资料
-2. **向我提问** — 比如 "Explain gradient descent" 或 "什么是 Fourier Transform？"
-3. **深入学习** — 我会基于你的课程资料，逐层深入地为你讲解
+- 📎 **上传课程 PDF** — 在下方输入框旁点击 📎 或直接拖拽文件即可上传（支持多选）。重复上传同一份文件会自动跳过解析。
+- ❓ **向我提问** — 比如 "Explain gradient descent" 或 "什么是 Fourier Transform？"
+- 📚 **查看历史** — 输入 `/history` 查看历史对话、上传过的文件和讲解记录
 
 > ⚠️ 注意：我只针对 notes/slides/textbooks 等知识性内容讲解。Labs、homeworks 和 projects 请你自己独立实践完成。"""
 
@@ -66,10 +68,12 @@ def _get_agent() -> TeachingAgent:
 async def on_chat_start():
     """Initialize a new chat session.
 
-    1. Create user session
-    2. Send welcome message
-    3. Prompt for initial course PDF upload
-    4. Process uploaded files through ingestion pipeline
+    1. Create user session + persistent history record
+    2. Send welcome message with file-upload instructions
+    3. (No blocking file prompt — the input stays free for /history etc.)
+
+    Files are processed via message.elements in @cl.on_message when the
+    student attaches a PDF at any point during the conversation.
     """
     # Create user session
     user_id = cl.user_session.get("id", "default")
@@ -86,51 +90,21 @@ async def on_chat_start():
     _get_agent()
 
     # Send welcome message
-    welcome = WELCOME_MESSAGE + (
-        "\n\n---\n\n"
-        "💡 **小贴士**：输入 `/history` 可查看历史对话、上传过的文件和讲解记录。\n"
-        "重复上传同一份 PDF 会被自动跳过，无需手动去重。"
-    )
-    await cl.Message(content=welcome).send()
+    await cl.Message(content=WELCOME_MESSAGE).send()
+
+    # Soft prompt: tell the user how to proceed. We do NOT use a blocking
+    # AskFileMessage here because that modal would prevent them from typing
+    # commands like /history before uploading anything.
+    await cl.Message(
+        content=(
+            "📚 准备好了吗？\n"
+            "- 点击下方输入框旁的 📎 上传课程 PDF（或直接拖拽文件进来）\n"
+            "- 或者直接向我提问、输入 `/history` 查看历史\n\n"
+            "上传后我会自动解析并构建知识库，重复上传的同一文件会自动跳过。"
+        )
+    ).send()
 
     logger.info("Chat started: user=%s, thread=%s", user_id, session.thread_id)
-
-    # Prompt for initial file upload
-    try:
-        files = await cl.AskFileMessage(
-            content="📚 请上传你的课程资料（支持多选 PDF 文件）：",
-            accept=["application/pdf"],
-            max_files=10,
-            timeout=3600,  # 1-hour timeout
-        ).send()
-
-        if files:
-            # Process uploaded files
-            status_msg = cl.Message(content="")
-            await status_msg.send()
-
-            success_count, total_chunks = await process_uploaded_files(
-                files, status_msg, thread_id=session.thread_id
-            )
-
-            if success_count > 0:
-                status_msg.content = (
-                    f"✅ 知识库构建完成！\n\n"
-                    f"- 成功处理: {success_count}/{len(files)} 个文件\n"
-                    f"- 总共生成: {total_chunks} 个知识块（chunks）\n\n"
-                    f"现在你可以基于这些资料向我提问了！"
-                )
-                await status_msg.update()
-        else:
-            await cl.Message(
-                content="ℹ️ 你还没有上传课程资料。可以先向我提问，或随时上传 PDF 文件。"
-            ).send()
-
-    except Exception as e:
-        logger.error("File upload flow failed: %s", e)
-        await cl.Message(
-            content=f"⚠️ 文件上传流程遇到问题: {str(e)}\n\n你可以先提问，或刷新页面重试。"
-        ).send()
 
 
 @cl.on_message
@@ -138,10 +112,10 @@ async def on_message(message: cl.Message):
     """Handle incoming student messages.
 
     Flow:
-    1. Check for attached files → process if any
-    2. Show thinking indicator
-    3. Run LangGraph teaching pipeline
-    4. Display structured response
+    1. If attached files → process them through the ingestion pipeline
+    2. If text is a /history command → render history view (returns early)
+    3. Otherwise: show thinking indicator → run LangGraph teaching pipeline
+       → assemble four-part response → record Q&A in history
     """
     # -- Step 0: Check for file attachments --
     thread_id = cl.user_session.get("thread_id", "default")
@@ -337,12 +311,16 @@ async def _render_history_view() -> None:
         actions=actions,
         timeout=600,
     )
-    await msg.send()
-    res = await msg.wait_for_answer()
+    # In Chainlit v2.11.1, AskActionMessage.send() returns the AskActionResponse
+    # directly (or None on timeout). ``wait_for_answer`` is a bool property, NOT
+    # a method — never call it.
+    res = await msg.send()
     if res is None:
+        await cl.Message(content="⏱ 历史查看已超时，可重新输入 `/history` 再试。").send()
         return
 
-    payload = res.get("payload", {})
+    # AskActionResponse behaves like a dict: res['payload'] or res.get('payload')
+    payload = res.get("payload", {}) if isinstance(res, dict) else getattr(res, "payload", {})
     sel_thread = payload.get("thread_id")
     if not sel_thread:
         return
