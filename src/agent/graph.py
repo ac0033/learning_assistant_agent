@@ -65,9 +65,20 @@ def _route_after_explanation(state: TeachingState) -> Literal["example_generatio
     - needs_example → example_generation
     - needs_math (but no example needed) → math_notation
     - neither → straight to summary
+
+    Defense: for ``learn_new`` intent we always advance to either example or
+    math, never jump straight to summary — that is the four-part-flow contract.
+    A spurious ``needs_example=False`` AND ``needs_math=False`` from the LLM
+    is overridden to ``needs_math=True`` here so learning requests never skip
+    all middle stages.
     """
     needs_example = state.get("needs_example", True)
     needs_math = state.get("needs_math", True)
+    intent = state.get("intent", "learn_new")
+
+    if intent == "learn_new" and not needs_example and not needs_math:
+        logger.info("[Router] learn_new with no example/math flags → force math_notation")
+        needs_math = True
 
     if needs_example:
         logger.info("[Router] → example_generation")
@@ -76,16 +87,29 @@ def _route_after_explanation(state: TeachingState) -> Literal["example_generatio
         logger.info("[Router] → math_notation (skip examples)")
         return "math_notation"
     else:
-        logger.info("[Router] → summary_transition (skip examples & math)")
+        logger.info("[Router] → summary_transition (intent=%s, skip examples & math)", intent)
         return "summary_transition"
 
 
 def _route_after_example(state: TeachingState) -> Literal["math_notation", "summary_transition"]:
-    """After examples, go to math notation or straight to summary."""
+    """After examples, go to math notation unless the query is clearly non-mathy.
+
+    Defaults to ``math_notation``: the four-part teaching flow expects a math
+    step, and `query_understanding_node` already override-sets ``needs_math``
+    True when math signal words appear. We only skip the math node when the
+    intent is clearly non-learning (refuse / navigate / review of pure recall)
+    AND ``needs_math`` is explicitly False — this catches "Summarize what we
+    covered" / "Hello" while never skipping a learn_new request even if the
+    LLM happened to leave needs_math=False (the upstream guard already flips
+    it, but this defense-in-depth keeps a redundant safety net).
+    """
     needs_math = state.get("needs_math", True)
-    if needs_math:
-        return "math_notation"
-    return "summary_transition"
+    intent = state.get("intent", "learn_new")
+    if not needs_math and intent in ("refuse", "navigate", "review"):
+        logger.info("[Router] → summary_transition (intent=%s, needs_math=False)", intent)
+        return "summary_transition"
+    logger.info("[Router] → math_notation (intent=%s, needs_math=%s)", intent, needs_math)
+    return "math_notation"
 
 
 def build_graph() -> StateGraph:

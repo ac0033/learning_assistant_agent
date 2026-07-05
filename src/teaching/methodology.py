@@ -36,65 +36,89 @@ _PART_HEADER_KEYWORDS: dict[str, tuple[str, str]] = {
 
 
 def _strip_duplicate_part_header(text: str, part_key: str) -> str:
-    """Remove the LLM-emitted section header from the start of ``text``.
+    """Remove the LLM-emitted section header lines from anywhere in ``text``.
 
     The teaching prompts ask the model to "write Part ②: …" which the model
-    echoes verbatim as the first line. Since ``assemble_full_response``
-    prepends its own canonical ``PART_LABELS`` header, the echoed line
-    would otherwise appear twice in the rendered message.
+    often echoes verbatim. Since ``assemble_full_response`` prepends its own
+    canonical ``PART_LABELS`` header, an echoed line would otherwise appear
+    twice in the rendered message.
 
-    Strategy: drop leading lines that look like a part header — short lines
-    (<=80 chars) whose alphanumeric content matches the part's English title
-    or the circled digit, OR decorative lines containing only the chinese
-    subtitle. Stop at the first content line.
+    Strategy (full-scan, NOT lead-line only): the model sometimes writes a
+    one-line preamble (e.g. "好的，现在我们来写 **② Interspersed Examples
+    （示例展开）**。我会…") and only AFTER that emits a bare header line
+    ("② Interspersed Examples（示例展开）"). A lead-only stripper stops at
+    the preamble and misses the bare header. Here we walk EVERY line and
+    drop any line that, on its own, looks like a part header:
+
+      - short (≤80 chars after stripping noise)
+      - dominated by the part's english title / chinese subtitle tokens
+        (>= 2 title tokens hit, OR full english title present, OR
+        chinese subtitle present), with at most 1 body word (≠ title tokens)
+      - OR a "Part N:" decorative prefix-only line
+      - NOT inside a ``$$…$$`` / ``$…$`` math block
+      - NOT an Example/Step/numbered-list item ("Example 1:", "Step 2:",
+        "1. ", "1 Gather …") — those are body content the student needs.
+
+    The preamble line (containing many body words) is kept because it carries
+    useful transitional voice; only bare header lines are removed.
     """
     en_title, cn_title = _PART_HEADER_KEYWORDS.get(part_key, ("", ""))
     if not en_title:
         return text.strip()
 
-    lines = text.split("\n")
-    kept: list[str] = []
-    seen_header = False
-    for line in lines:
-        if seen_header:
-            kept.append(line)
-            continue
+    # Tokenize the canonical english title once for the word-overlap test.
+    header_toks = set(re.split(r"\s+", en_title.lower().replace("&", " "))) | set(en_title.lower().split())
+    header_toks -= {"", "&", "and"}
+    cn_toks = {cn_title}
+
+    # Decode text into segments, protecting math blocks so we never strip a
+    # header-looking fragment that is actually inside a math expression.
+    math_spans: list[tuple[int, int]] = []
+    for m in re.finditer(r"\$\$.+?\$\$|\$[^$]+?\$", text, re.DOTALL):
+        math_spans.append((m.start(), m.end()))
+
+    def _in_math(pos: int) -> bool:
+        return any(s <= pos < e for s, e in math_spans)
+
+    out_lines: list[str] = []
+    pos = 0
+    for line in text.split("\n"):
+        line_end = pos + len(line)
         stripped = line.strip()
-        if not stripped:
-            # Keep blank line only if we haven't started body yet — drop it.
-            continue
-        # Normalize for matching: strip markdown emphasis, circled digits, separators.
-        norm = re.sub(r"[#*`_>:]+", "", stripped)
-        norm = norm.replace("①", "").replace("②", "").replace("③", "").replace("④", "")
-        # Remove chinese separator punctuation and full-width parens/spaces for tokenization:
-        norm_alpha = re.sub(r"[·•：:.\-—\s（）()【】\[\]]+", " ", norm).strip()
-        # Token set (lowercased) for word-overlap check.
-        tok_str = re.sub(r"\s+", " ", norm_alpha).lower().strip()
-        tokens = set(tok_str.split()) if tok_str else set()
-        # Tokens the line must be DOMINATED by to count as a header (not body).
-        header_toks = set(re.split(r"\s+", en_title.lower().replace("&", " "))) | set(en_title.lower().split())
-        header_toks -= {"", "&", "and"}
-        cn_toks = {cn_title}
-        # Count body-word tokens = tokens that aren't header tokens and aren't pure punctuation.
-        body_toks = {t for t in tokens if t and t not in header_toks and t not in cn_toks and len(t) > 1}
-        # A leading header line is one that mentions the english title (>= 2 of its words)
-        # OR the chinese subtitle, AND has very few body words.
-        en_hit = sum(1 for t in header_toks if t in tokens)
-        mentions_title = (en_hit >= 2) or (en_title.lower() in tok_str) or (cn_title in norm)
-        body_word_count = len(body_toks)
-        # is_header_line: mentions title AND has at most 1 body word, and line is short.
-        is_header_line = mentions_title and body_word_count <= 1 and len(norm_alpha) <= 80
-        # Also catch a "Part N:" prefix-only decorative line.
-        is_part_prefix_only = bool(re.fullmatch(r"[Pp]art\s*[①②③④1-4]\s*:?\s*", norm_alpha))
+        if stripped and not _in_math(pos):
+            # Strip markdown emphasis, circled digits, separators once.
+            norm = re.sub(r"[#*`_>:]+", "", stripped)
+            norm = norm.replace("①", "").replace("②", "").replace("③", "").replace("④", "")
+            norm_alpha = re.sub(r"[·•：:.\-—\s（）()【】\[\]]+", " ", norm).strip()
+            tok_str = re.sub(r"\s+", " ", norm_alpha).lower().strip()
+            tokens = set(tok_str.split()) if tok_str else set()
+            body_toks = {t for t in tokens if t and t not in header_toks and t not in cn_toks and len(t) > 1}
+            en_hit = sum(1 for t in header_toks if t in tokens)
+            mentions_title = (en_hit >= 2) or (en_title.lower() in tok_str) or (cn_title in norm)
+            is_header_line = (
+                mentions_title
+                and len(body_toks) <= 1
+                and len(norm_alpha) <= 80
+            )
+            is_part_prefix_only = bool(re.fullmatch(r"[Pp]art\s*[①②③④1-4]\s*:?\s*", norm_alpha))
+            # Reject lines that look like Example/Step/numbered-list content
+            # so we never drop "Example 1: …" — those are real body even when
+            # they happen to mention the title words.
+            is_list_item = bool(re.match(
+                r"^(?:Example\s+\d+|Step\s+\d+|\d+\.\s|例\s*\d+|case\s+\d+|Case\s+\d+)",
+                stripped,
+                re.IGNORECASE,
+            ))
+            if (is_header_line or is_part_prefix_only) and not is_list_item:
+                pos = line_end + 1  # skip this line + the newline
+                continue
+        out_lines.append(line)
+        pos = line_end + 1
 
-        if is_header_line or is_part_prefix_only:
-            seen_header = True
-            continue
-        # First non-header content line — keep it and everything after.
-        kept.append(line)
-        seen_header = True
-
-    return "\n".join(kept).strip() if seen_header else text.strip()
+    # Collapse runs of blank lines that header-removal may have produced.
+    cleaned = "\n".join(out_lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 # ---------------------------------------------------------------------------
 # LaTeX normalization — post-process LLM output for KaTeX rendering

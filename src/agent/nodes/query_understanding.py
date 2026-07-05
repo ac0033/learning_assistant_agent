@@ -33,6 +33,28 @@ _GREETING_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Math-signal keywords (en + zh). When the spoken topic matches one of these,
+# the LLM's `needs_math=False` is overridden to True so the ③ Math & Notation
+# node is never skipped for topics that obviously contain formulas.
+_MATH_SIGNAL_RE = re.compile(
+    r"(?:softmax|sigmoid|cross[\s-]*entropy|loss|gradient|derivative|backprop(?:agation)?|"
+    r"matrix|matrices|vector|向量|矩阵|概率|probability|distribution|分布|"
+    r"激活|activation|relu|tanh|"
+    r"rnn|lstm|gru|transformer|attention|q\s*k\s*v|"
+    r"normaliz(?:e|ation)|regulariz(?:e|ation)|dropout|"
+    r"最小化|minimi[sz]e|最大|maximi[sz]e|优化|optimi[sz]|objective|"
+    r"线性|linear|非线性|nonlinear|"
+    r"likelihood|似然|bayes|贝叶斯|posterior|先验|prior|"
+    r"epoch|lr|learning\s*rate|update|更新规则|"
+    r"correlation|correlat|co-?occurrence|co\s*occurrence|"
+    r"fitness|误差|偏差|variance|偏差|偏差方差|"
+    r"singular|decompos|分解|eigen|特征值|特征向量|特征向量|"
+    r"公式|formula|equation|等式|推导|derivation|"
+    r"\\sum|\\frac|\\int|\\beta|\\alpha|\\theta|\\lambda|\\sigma\-?|\$\$)",
+    re.IGNORECASE,
+)
+_MATH_HINT_RE = re.compile(r"(?:第\s*[2-9]\s*部分|part\s*[2-9]|math|notation|符号|推导|公式)", re.IGNORECASE)
+
 
 async def query_understanding_node(state: TeachingState) -> dict[str, Any]:
     """Analyze the student's query and extract structured information.
@@ -90,16 +112,33 @@ async def query_understanding_node(state: TeachingState) -> dict[str, Any]:
             if not result.get("target_topic") or result.get("target_topic") == "general":
                 result["target_topic"] = "overview of uploaded course materials"
 
+    # --- Code-level guard: never skip the ③ Math & Notation node for mathy topics ---
+    # LLM may set needs_math=False for "softmax / loss / gradient / 正则化" because
+    # it classified the *task* as conceptual rather than formulaic. But the
+    # student still wants the derivation. Force needs_math=True when:
+    #   - the query or the (LLM-extracted) target_topic mentions a math signal word.
+    # We never downgrade a True to False — only the other way around.
+    needs_math = bool(result.get("needs_math", True))
+    target_topic = result.get("target_topic", "") or user_query
+    if not needs_math:
+        text_for_check = f"{user_query} {target_topic} {result.get('intent','')}"
+        looks_mathy = bool(_MATH_SIGNAL_RE.search(text_for_check)) or bool(_MATH_HINT_RE.search(text_for_check))
+        if looks_mathy:
+            needs_math = True
+            logger.info(
+                "[QueryUnderstanding] Override needs_math False→True (math signal detected in query/topic)"
+            )
+
     logger.info(
-        "[QueryUnderstanding] intent=%s, topic=%s, difficulty=%s",
-        intent, result.get("target_topic"), result.get("difficulty")
+        "[QueryUnderstanding] intent=%s, topic=%s, difficulty=%s, needs_math=%s",
+        intent, target_topic, result.get("difficulty"), needs_math
     )
 
     return {
         "intent": intent,
-        "target_topic": result.get("target_topic", user_query),
+        "target_topic": target_topic,
         "difficulty": result.get("difficulty", "intermediate"),
         "needs_example": result.get("needs_example", True),
-        "needs_math": result.get("needs_math", True),
+        "needs_math": needs_math,
         "current_node": "query_understanding",
     }
