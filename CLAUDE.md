@@ -40,6 +40,7 @@ learning_assistant_agent/
 │   ├── agent/       # LangGraph 图与节点
 │   ├── teaching/    # 教学法模块
 │   └── ui/          # Chainlit UI
+├── tests/           # 端到端 + 单元测试（含 e2e_verify.py）
 └── data/            # 文档、向量库、中间结果
 ```
 
@@ -50,6 +51,8 @@ learning_assistant_agent/
 3. ✅ 核心 RAG + 基础 Chainlit
 4. ✅ LangGraph 智能体（四段式教学）
 5. ✅ 多 Agent 团队验收 + 全量代码审计 + Bug 修复
+6. ✅ 历史记录 + 上传去重 + Chainlit UI 修复
+7. ✅ 检索精准度（section 元数据 / 文件名过滤 / 跨源多样性）+ 展示层去重 + 路由兜底
 
 ## Lessons Learned
 
@@ -110,6 +113,74 @@ learning_assistant_agent/
 | 单例无需锁（asyncio） | 添加不必要的 `asyncio.Lock` | 同步无 `await` 的 getter 在 asyncio 中天然原子 |
 | Prompt 去重 | `SystemMessage` + `HumanMessage` 中重复嵌入同一文本 | System prompt 只在 `SystemMessage` 中传递 |
 
+### 7. Chainlit v2.11.1 真实 API 签名必须读源码确认
+
+**核心原则**：`AskActionMessage.send()` 直接返回 `AskActionResponse`（不是 `wait_for_answer()`），`wait_for_answer` 是 **bool 属性不是方法**（调用会抛 `TypeError: 'bool' object is not callable`）；`AskFileMessage` 是**阻塞弹窗**会锁住输入框，不能用于"打开对话即可输 `/history`"场景；`VectorStoreQuery.filters` 要 `MetadataFilters` 对象不是 dict。**永远不假设框架 API 与惯例一致**，一律查 `.venv/Lib/site-packages/<pkg>/` 源码。
+
+| 问题 | 教训 |
+|------|------|
+| 调用 `msg.wait_for_answer()` 报错 | 读源码：`send()` 返回 `AskActionResponse`，`wait_for_answer` 是 bool 字段 |
+| 打开对话必须先上传才能输指令 | `AskFileMessage` 阻塞输入框；改为非阻塞的 `message.elements` + 文字提示 |
+| `[features.spontaneous_file_upload]` 缺失 | `.chainlit/config.toml` 必须显式 `enabled = true`，否则输入框 📎 按钮**不显示** |
+| `filters={"source": x}` 报错 | LlamaIndex 要 `MetadataFilters(filters=[MetadataFilter(...)])` 对象 |
+
+### 8. `str.format()` 与 LaTeX 花括号冲突
+
+**核心原则**：任何被注入 prompt 模板的内容（检索 chunk / LLM 输出）可能含 LaTeX 下标 `X_{ij}`、`beta_{t-1}`，`str.format()` 会把 `{ij}` 当成格式字段抛 `KeyError: 'ij'`。
+
+| 错误做法 | 正确做法 |
+|---------|---------|
+| `PROMPT.format(retrieved_context=chunk)` | `render_prompt(PROMPT, retrieved_context=chunk)`（src/utils.py） |
+
+`render_prompt` 用正则只替换声明的 `{placeholder}`，注入值不再被二次解析。所有 6 个节点统一走 `render_prompt`。
+
+### 9. 路由不可单字信任 LLM 判断
+
+**核心原则**：`intent`/`needs_math`/`needs_example` 由 LLM 生成易误判。代码层必须有兜底，否则教学流程被误截断。
+
+| 误判案例 | 兜底措施 |
+|---------|---------|
+| "开始讲解"被判 `navigate` → 直送 END 显示空问候 | `query_understanding_node` 检测教学意图关键词命中且非纯问候 → 降级 `learn_new` |
+| softmax / loss / gradient 主题被判 `needs_math=False` → 跳过 ③ Math 节点（用户输出②后直接④） | `query_understanding_node` 检测数学信号词命中 → 强制 `needs_math=True`；`_route_after_example` 默认走 `math_notation`，仅 `intent ∈ {refuse, navigate, review}` 才跳 |
+
+**永远不要用一个 LLM 字段决定流程跳过**——必须有第二条独立信号或代码层默认值兜底。
+
+### 10. 检索索引会被"无去重的反复 ingest"污染
+
+**核心原则**：dedup 功能之前的多次 ingest 把同一份 PDF 反复入库 9 遍，81 chunk 中只有 9 个唯一，72 个重复让 BM25/dense 排名被同一 chunk 垄断，top-5 实际只是 1-2 个唯一 chunk —— 用户问"第2/3部分"时 LLM 完全无法区分。
+
+| 防护层 | 实施 |
+|-------|------|
+| 上传层 SHA-256 去重 | `file_handler.process_uploaded_files` 算文件级 hash，命中全局 registry 即跳过 ingest |
+| 索引层 `(source, content)` 查重 | `VectorStoreManager.add_nodes` 每次 add 前查重，未来再污染也能挡 |
+| 一次清理存量 | `VectorStoreManager.dedup_by_content()`，retriever 构造时自动跑一次 |
+
+### 11. 展示层去重必须"全文扫描"而非"前导扫描"
+
+**核心原则**：LLM 常先写一句导语"好的，现在我们来写 Part Ⅱ…"（含大量正文词），再写裸标题行 `② Interspersed Examples（示例展开）`。只剥前导行的 stripper 见到首句导语就停止，**漏掉导语后的标题行** → 输出仍重复。
+
+| 错误策略 | 正确策略 |
+|---------|---------|
+| 扫描到首个非 header 行就停止 | 遍历**所有**行，删除任何"短、标题-dominated、不在数学块内、非 Example/Step 编号列表项"的独立 header 行 |
+| 仅检查首行 | 跳过 `$...$`/`$$...$$` 数学块内、保留含正文词 ≥ 2 的导语行 |
+
+`_strip_duplicate_part_header`（methodology.py）现在全文扫描，每行独立判定。
+
+### 12. chunk 必须带 section 元数据
+
+**核心原则**：用户问"讲讲 xxx.pdf 第2部分和第3部分"时，chunk 无 section 标签 → LLM 不知哪段是 part 2 / part 3，把 "Evaluation" 误说成 "实际上在笔记里是第二部分"。
+
+| 实施 | 说明 |
+|------|------|
+| 检测 3 种 heading | markdown `## 2 T`、同行 `2 T`、PDF 跨行 `2\nT` |
+| Title-Case 启发式过滤列表项 | 末词须大写字母开头（Vectors/Matrix/Tasks），过滤 `1 Gather fixed size…`、`1 Course Instructors` |
+| 写 `metadata['section_heading']` + 文本前缀 `[Section: N Title]` | dense embedder / BM25 / teaching LLM 三者都能看到 section 上下文 |
+| 文档顺序传播最后一个 heading | 不含自己 heading 的 chunk 继承前一 chunk 的 section |
+
+### 13. 每次功能更新必须调用 subagent 执行端到端验证
+
+**核心原则**：`tests/e2e_verify.py` 涵盖 S1 开对话 → S2 上传 + dedup → S3 提问 `assemble_full_response` 标题去重 → S4 路由 `needs_math` 兜底 → S5 检索 source 过滤 + 跨源/跨 section 多样性五阶段。**提交 commit 前必须用 `task` 工具调用一个 `explore` 类型 subagent 跑此脚本并报告 PASS/FAIL**；FAIL 一律补修复，**禁止凭 import OK 或单节点测试通过就提交**。
+
 ## Testing Checklist
 
 每次代码改动后，按以下顺序验证：
@@ -118,4 +189,7 @@ learning_assistant_agent/
 1. uv run python -c "from src.agent.graph import TeachingAgent"     # 导入链
 2. uv run python -c "from src.ingestion.pipeline import IngestionPipeline; p = IngestionPipeline()"  # 组件初始化
 3. uv run python -c "agent = TeachingAgent(); asyncio.run(agent.ateach('test question', 'test'))"  # 全链路
+4. uv run python tests/e2e_verify.py                                  # 端到端 S1-S5（提交前必过）
 ```
+
+第 4 步是**提交前硬性门槛**：覆盖历史记录 / 上传去重 / 标题去重 / 路由兜底 / 检索多样性。任何一步 FAIL 不得提交。
