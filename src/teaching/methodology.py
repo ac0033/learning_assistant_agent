@@ -21,6 +21,81 @@ PART_LABELS = {
     "summary": "## ④ Summary · 总结提炼",
 }
 
+# Variants the LLM tends to emit at the start of each part (because the
+# generation prompts instruct it to "write Part ②: **Interspersed
+# Examples（示例展开）**"). These get stripped before we prepend our
+# canonical PART_LABELS so the student doesn't see the header twice.
+# Detection is line based and tolerant of markdown emphasis, the circled
+# ①②③④ glyph, "Part N:", full-width parens, and the chinese subtitle.
+_PART_HEADER_KEYWORDS: dict[str, tuple[str, str]] = {
+    "core":     ("Core Process",          "核心流程"),
+    "example":  ("Interspersed Examples", "示例展开"),
+    "math":     ("Math & Notation",       "数学与符号"),
+    "summary":  ("Summary",               "总结提炼"),
+}
+
+
+def _strip_duplicate_part_header(text: str, part_key: str) -> str:
+    """Remove the LLM-emitted section header from the start of ``text``.
+
+    The teaching prompts ask the model to "write Part ②: …" which the model
+    echoes verbatim as the first line. Since ``assemble_full_response``
+    prepends its own canonical ``PART_LABELS`` header, the echoed line
+    would otherwise appear twice in the rendered message.
+
+    Strategy: drop leading lines that look like a part header — short lines
+    (<=80 chars) whose alphanumeric content matches the part's English title
+    or the circled digit, OR decorative lines containing only the chinese
+    subtitle. Stop at the first content line.
+    """
+    en_title, cn_title = _PART_HEADER_KEYWORDS.get(part_key, ("", ""))
+    if not en_title:
+        return text.strip()
+
+    lines = text.split("\n")
+    kept: list[str] = []
+    seen_header = False
+    for line in lines:
+        if seen_header:
+            kept.append(line)
+            continue
+        stripped = line.strip()
+        if not stripped:
+            # Keep blank line only if we haven't started body yet — drop it.
+            continue
+        # Normalize for matching: strip markdown emphasis, circled digits, separators.
+        norm = re.sub(r"[#*`_>:]+", "", stripped)
+        norm = norm.replace("①", "").replace("②", "").replace("③", "").replace("④", "")
+        # Remove chinese separator punctuation and full-width parens/spaces for tokenization:
+        norm_alpha = re.sub(r"[·•：:.\-—\s（）()【】\[\]]+", " ", norm).strip()
+        # Token set (lowercased) for word-overlap check.
+        tok_str = re.sub(r"\s+", " ", norm_alpha).lower().strip()
+        tokens = set(tok_str.split()) if tok_str else set()
+        # Tokens the line must be DOMINATED by to count as a header (not body).
+        header_toks = set(re.split(r"\s+", en_title.lower().replace("&", " "))) | set(en_title.lower().split())
+        header_toks -= {"", "&", "and"}
+        cn_toks = {cn_title}
+        # Count body-word tokens = tokens that aren't header tokens and aren't pure punctuation.
+        body_toks = {t for t in tokens if t and t not in header_toks and t not in cn_toks and len(t) > 1}
+        # A leading header line is one that mentions the english title (>= 2 of its words)
+        # OR the chinese subtitle, AND has very few body words.
+        en_hit = sum(1 for t in header_toks if t in tokens)
+        mentions_title = (en_hit >= 2) or (en_title.lower() in tok_str) or (cn_title in norm)
+        body_word_count = len(body_toks)
+        # is_header_line: mentions title AND has at most 1 body word, and line is short.
+        is_header_line = mentions_title and body_word_count <= 1 and len(norm_alpha) <= 80
+        # Also catch a "Part N:" prefix-only decorative line.
+        is_part_prefix_only = bool(re.fullmatch(r"[Pp]art\s*[①②③④1-4]\s*:?\s*", norm_alpha))
+
+        if is_header_line or is_part_prefix_only:
+            seen_header = True
+            continue
+        # First non-header content line — keep it and everything after.
+        kept.append(line)
+        seen_header = True
+
+    return "\n".join(kept).strip() if seen_header else text.strip()
+
 # ---------------------------------------------------------------------------
 # LaTeX normalization — post-process LLM output for KaTeX rendering
 # ---------------------------------------------------------------------------
@@ -115,16 +190,20 @@ class TeachingMethodology:
         parts = []
 
         if core_explanation:
-            parts.append(f"{PART_LABELS['core']}\n\n{normalize_latex(core_explanation)}")
+            cleaned = _strip_duplicate_part_header(core_explanation, "core")
+            parts.append(f"{PART_LABELS['core']}\n\n{normalize_latex(cleaned)}")
 
         if examples:
-            parts.append(f"{PART_LABELS['example']}\n\n{normalize_latex(examples)}")
+            cleaned = _strip_duplicate_part_header(examples, "example")
+            parts.append(f"{PART_LABELS['example']}\n\n{normalize_latex(cleaned)}")
 
         if math_notation:
-            parts.append(f"{PART_LABELS['math']}\n\n{normalize_latex(math_notation)}")
+            cleaned = _strip_duplicate_part_header(math_notation, "math")
+            parts.append(f"{PART_LABELS['math']}\n\n{normalize_latex(cleaned)}")
 
         if section_summary:
-            parts.append(f"{PART_LABELS['summary']}\n\n{normalize_latex(section_summary)}")
+            cleaned = _strip_duplicate_part_header(section_summary, "summary")
+            parts.append(f"{PART_LABELS['summary']}\n\n{normalize_latex(cleaned)}")
 
         full_response = SECTION_SEPARATOR.join(parts)
 
@@ -151,16 +230,20 @@ class TeachingMethodology:
         parts = []
 
         if core_explanation:
-            parts.append(f"{PART_LABELS['core']}\n\n{normalize_latex(core_explanation)}")
+            cleaned = _strip_duplicate_part_header(core_explanation, "core")
+            parts.append(f"{PART_LABELS['core']}\n\n{normalize_latex(cleaned)}")
 
         if examples is not None:
-            parts.append(f"{PART_LABELS['example']}\n\n{normalize_latex(examples)}")
+            cleaned = _strip_duplicate_part_header(examples, "example")
+            parts.append(f"{PART_LABELS['example']}\n\n{normalize_latex(cleaned)}")
 
         if math_notation is not None:
-            parts.append(f"{PART_LABELS['math']}\n\n{normalize_latex(math_notation)}")
+            cleaned = _strip_duplicate_part_header(math_notation, "math")
+            parts.append(f"{PART_LABELS['math']}\n\n{normalize_latex(cleaned)}")
 
         if section_summary is not None:
-            parts.append(f"{PART_LABELS['summary']}\n\n{normalize_latex(section_summary)}")
+            cleaned = _strip_duplicate_part_header(section_summary, "summary")
+            parts.append(f"{PART_LABELS['summary']}\n\n{normalize_latex(cleaned)}")
 
         return SECTION_SEPARATOR.join(parts) if parts else ""
 
