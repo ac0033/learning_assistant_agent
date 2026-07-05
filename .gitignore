@@ -37,6 +37,7 @@ data/history/*
 # Chainlit
 .chainlit/
 chainlit.db
+.files/
 
 # Logs
 *.log
