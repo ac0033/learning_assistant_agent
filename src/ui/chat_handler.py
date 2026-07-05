@@ -21,12 +21,16 @@ from ..agent.graph import TeachingAgent
 from ..teaching.methodology import TeachingMethodology
 from .session_manager import SessionManager
 from .file_handler import process_uploaded_files
+from .history_manager import history_manager
 
 logger = logging.getLogger(__name__)
 
 # Global singletons
 _agent: Optional[TeachingAgent] = None
 _session_manager = SessionManager()
+
+# Commands that open the conversation history view (instead of teaching)
+HISTORY_COMMANDS = {"/history", "/历史", "查看历史", "历史记录", "查看历史记录"}
 
 # Welcome message template
 WELCOME_MESSAGE = """# 🎓 开源课程助教 Agent
@@ -75,11 +79,19 @@ async def on_chat_start():
     cl.user_session.set("thread_id", session.thread_id)
     cl.user_session.set("user_session", session)
 
+    # Create a persistent history record for this conversation
+    history_manager.create_conversation(session.thread_id, user_id=user_id)
+
     # Initialize agent
     _get_agent()
 
     # Send welcome message
-    await cl.Message(content=WELCOME_MESSAGE).send()
+    welcome = WELCOME_MESSAGE + (
+        "\n\n---\n\n"
+        "💡 **小贴士**：输入 `/history` 可查看历史对话、上传过的文件和讲解记录。\n"
+        "重复上传同一份 PDF 会被自动跳过，无需手动去重。"
+    )
+    await cl.Message(content=welcome).send()
 
     logger.info("Chat started: user=%s, thread=%s", user_id, session.thread_id)
 
@@ -97,7 +109,9 @@ async def on_chat_start():
             status_msg = cl.Message(content="")
             await status_msg.send()
 
-            success_count, total_chunks = await process_uploaded_files(files, status_msg)
+            success_count, total_chunks = await process_uploaded_files(
+                files, status_msg, thread_id=session.thread_id
+            )
 
             if success_count > 0:
                 status_msg.content = (
@@ -130,6 +144,7 @@ async def on_message(message: cl.Message):
     4. Display structured response
     """
     # -- Step 0: Check for file attachments --
+    thread_id = cl.user_session.get("thread_id", "default")
     elements = getattr(message, "elements", None)
     if elements:
         pdf_elements = [e for e in elements if getattr(e, "mime", "") == "application/pdf"
@@ -137,7 +152,9 @@ async def on_message(message: cl.Message):
         if pdf_elements:
             status_msg = cl.Message(content="")
             await status_msg.send()
-            success_count, total_chunks = await process_uploaded_files(pdf_elements, status_msg)
+            success_count, total_chunks = await process_uploaded_files(
+                pdf_elements, status_msg, thread_id=thread_id
+            )
             if success_count > 0:
                 status_msg.content = (
                     f"✅ 已处理 {success_count} 个文件，生成 {total_chunks} 个知识块。\n"
@@ -146,14 +163,17 @@ async def on_message(message: cl.Message):
                 await status_msg.update()
 
     # -- Step 1: Handle text query --
-    user_query = message.content.strip() if message.content else ""
+    user_query = (message.content or "").strip()
     if not user_query:
         # User only uploaded files without a question
         if not elements:
             await cl.Message(content="请提出你的问题，我会尽力帮你解答！").send()
         return
 
-    thread_id = cl.user_session.get("thread_id", "default")
+    # -- Step 1b: History command — show past conversations/files/explanations --
+    if user_query.lower() in HISTORY_COMMANDS:
+        await _render_history_view()
+        return
 
     logger.info("Received query [thread=%s]: %s", thread_id, user_query[:100])
 
@@ -235,6 +255,18 @@ async def on_message(message: cl.Message):
             result.get("target_topic", user_query),
         )
 
+    # Persist this Q&A pair (with a short preview of the summary) to history
+    try:
+        summary_preview = (summary or core or "")[:200].replace("\n", " ")
+        history_manager.record_qa(
+            thread_id=thread_id,
+            query=user_query,
+            topic=result.get("target_topic", user_query),
+            summary_preview=summary_preview,
+        )
+    except Exception as e:
+        logger.warning("Failed to record Q&A in history: %s", e)
+
     # Show sources if available
     chunks = result.get("retrieved_chunks", [])
     if chunks:
@@ -246,3 +278,120 @@ async def on_message(message: cl.Message):
         ).send()
 
     logger.info("Response sent [thread=%s]: %d chars", thread_id, len(full_response))
+
+
+async def _render_history_view() -> None:
+    """Render past conversations, their uploaded files, and Q&A summaries.
+
+    Uses AskActionMessage with one Action per conversation so the student
+    can click a button to view that conversation's full file/Q&A listing.
+    """
+    try:
+        convs = history_manager.list_conversations()
+    except Exception as e:
+        logger.error("Failed to load history: %s", e)
+        await cl.Message(content=f"⚠️ 读取历史记录失败: {e}").send()
+        return
+
+    if not convs:
+        await cl.Message(
+            content="📭 还没有历史记录。\n上传课程资料并提问后，这里会出现对话清单。"
+        ).send()
+        return
+
+    overview_lines = ["## 📚 历史对话总览\n"]
+    actions: list[cl.Action] = []
+    MAX_SHOW = 8
+    for idx, conv in enumerate(convs[:MAX_SHOW], start=1):
+        created = conv.get("created_at", "?")
+        files = conv.get("files", [])
+        qa_list = conv.get("q_and_a", [])
+        thread = conv.get("thread_id", "")
+        overview_lines.append(
+            f"**{idx}.** `{created}`  ·  📄 {len(files)} 个文件  ·  💬 {len(qa_list)} 次问答"
+        )
+        if files:
+            overview_lines.append("   - 文件: " + ", ".join(
+                f["name"] for f in files
+            ))
+        if qa_list:
+            first_q = qa_list[0].get("query", "")[:40]
+            overview_lines.append(f"   - 首问: {first_q}")
+        overview_lines.append("")
+        actions.append(cl.Action(
+            name="view_conv",
+            payload={"thread_id": thread, "idx": idx},
+            label=f"查看第{idx}条",
+            tooltip=f"展开 {created} 的文件与讲解记录",
+            icon="",
+        ))
+
+    if len(convs) > MAX_SHOW:
+        overview_lines.append(
+            f"\n_（仅显示最近 {MAX_SHOW} 条，共 {len(convs)} 条历史记录。）_"
+        )
+
+    content = "\n".join(overview_lines)
+    msg = cl.AskActionMessage(
+        content=content + "\n点击下方按钮可展开对应文件的「文件 + 讲解摘要」明细：",
+        actions=actions,
+        timeout=600,
+    )
+    await msg.send()
+    res = await msg.wait_for_answer()
+    if res is None:
+        return
+
+    payload = res.get("payload", {})
+    sel_thread = payload.get("thread_id")
+    if not sel_thread:
+        return
+
+    conv = history_manager.get_conversation(sel_thread)
+    if conv is None:
+        await cl.Message(content="⚠️ 未找到该对话记录（可能已被清除）。").send()
+        return
+
+    await _render_conversation_detail(conv)
+
+
+async def _render_conversation_detail(conv: dict) -> None:
+    """Build a detailed markdown view for one conversation record."""
+    lines = [
+        f"## 🗂 对话明细  `{conv.get('created_at', '')}`\n",
+        f"- Thread: `{conv.get('thread_id', '')}`",
+        f"- 创建时间: {conv.get('created_at', '?')}",
+        f"- 更新时间: {conv.get('updated_at', '?')}",
+    ]
+
+    files = conv.get("files", [])
+    lines.append("\n### 📄 上传的文件\n")
+    if not files:
+        lines.append("- 无")
+    else:
+        lines.append("| 文件名 | Chunks | 内容指纹(前12位) |")
+        lines.append("|---|---|---|")
+        for f in files:
+            h = (f.get("hash") or "")[:12]
+            lines.append(f"| {f.get('name','')} | {f.get('chunks','')} | `{h}` |")
+
+    qa_list = conv.get("q_and_a", [])
+    lines.append("\n### 💬 提问与讲解摘要\n")
+    if not qa_list:
+        lines.append("- 该对话还没有提问记录。")
+    else:
+        for i, qa in enumerate(qa_list, start=1):
+            lines.append(f"**Q{i}.** `{qa.get('time','')}` — 主题: {qa.get('topic','')}")
+            lines.append(f"> 问：{qa.get('query','')}")
+            preview = qa.get("summary_preview", "")
+            if preview:
+                lines.append(f"> 讲解摘要：{preview}…")
+            lines.append("")
+
+    lines.append(
+        "\n---\n"
+        "💡 提示：本对话的所有文件已索引进向量库。开启新对话时重新上传同一份 PDF "
+        "会被自动跳过，无需手动去重。如需在原对话上继续追问，请回到该对话窗口。"
+    )
+
+    await cl.Message(content="\n".join(lines)).send()

@@ -28,9 +28,11 @@ Desktop.ini
 data/documents/*
 data/chroma_db/*
 data/processed/*
+data/history/*
 !data/documents/.gitkeep
 !data/chroma_db/.gitkeep
 !data/processed/.gitkeep
+!data/history/.gitkeep
 
 # Chainlit
 .chainlit/

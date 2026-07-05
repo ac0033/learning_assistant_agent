@@ -19,6 +19,10 @@ import chainlit as cl
 
 from ..ingestion.pipeline import IngestionPipeline
 from config.settings import settings
+from .history_manager import (
+    compute_file_hash,
+    history_manager,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,19 +45,25 @@ def _get_pipeline() -> IngestionPipeline:
 async def process_uploaded_files(
     files: list,
     status_msg: cl.Message,
+    thread_id: str = "default",
 ) -> Tuple[int, int]:
     """Process uploaded PDF files through the ingestion pipeline.
 
     This is a reusable pure function — call it from @cl.on_chat_start
     or @cl.on_message when file elements are detected.
 
+    Files already seen (by content hash) are skipped so the student does
+    not pay the re-ingestion cost of re-uploading the same PDF.
+
     Args:
         files: A list of uploaded file objects (from cl.AskFileMessage or
                message.elements). Each must have .path and .name attributes.
         status_msg: A cl.Message to update with progress information.
+        thread_id: Conversation thread this upload belongs to (for history).
 
     Returns:
-        (success_count, total_chunks): Number of files processed and total chunks created.
+        (success_count, total_chunks): files newly processed this call
+        (duplicates count toward success but add 0 chunks).
     """
     # Filter PDF files
     pdf_files = [f for f in files if f.name.lower().endswith(".pdf")]
@@ -73,10 +83,24 @@ async def process_uploaded_files(
     pipeline = _get_pipeline()
     total_chunks = 0
     success_count = 0
+    skipped_duplicates: list[str] = []
 
     for file in pdf_files:
         try:
             file_path = Path(file.path)
+
+            # --- Dedup by content hash (whole-file SHA-256) ---
+            content_hash = await asyncio.to_thread(compute_file_hash, file_path)
+            known = history_manager.is_file_known(content_hash)
+            if known is not None:
+                logger.info("Skipping duplicate file %s (hash=%s, previously %s)",
+                            file.name, content_hash[:12], known.get("name"))
+                skipped_duplicates.append(file.name)
+                history_manager.register_file(
+                    thread_id, file.name, content_hash, known.get("chunks", 0)
+                )
+                success_count += 1
+                continue
 
             # Ensure persistent storage directory exists
             doc_dir = settings.documents_dir
@@ -91,6 +115,10 @@ async def process_uploaded_files(
             chunks = await asyncio.to_thread(pipeline.ingest_file, dest_path)
             total_chunks += chunks
             success_count += 1
+
+            # Register in history (per-thread + global dedup registry)
+            history_manager.register_file(thread_id, file.name, content_hash, chunks)
+            history_manager.register_file_global(content_hash, file.name, chunks, thread_id)
 
             logger.info("Ingested: %s (%d chunks)", file.name, chunks)
 
@@ -108,11 +136,30 @@ async def process_uploaded_files(
     except Exception as e:
         logger.warning("Failed to refresh retriever: %s. Will rebuild on demand.", e)
 
+    # Surface duplicate info to the student
+    if skipped_duplicates:
+        note = "、".join(skipped_duplicates)
+        status_msg.content = (
+            f"ℹ️ 检测到重复文件已跳过解析：{note}\n"
+            f"（同一内容只入库一次，避免重复处理。\n"
+            f"可在 /history 中查看该文件参与的过往对话。）"
+        )
+        await status_msg.update()
+
     return success_count, total_chunks
 
 
 @cl.on_chat_resume
 async def on_chat_resume():
     """Restore session when a user reconnects to an existing chat."""
+    from .history_manager import history_manager
     thread_id = cl.user_session.get("thread_id", "unknown")
     logger.info("Chat resumed: thread=%s", thread_id)
+    # Ensure a history record exists for the resumed thread and reload the
+    # retriever so the previously-uploaded files remain searchable.
+    try:
+        history_manager.create_conversation(thread_id)
+        from ..indexing.hybrid_retriever import refresh_retriever
+        refresh_retriever()
+    except Exception as e:
+        logger.warning("on_chat_resume restore failed: %s", e)
