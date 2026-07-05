@@ -76,15 +76,53 @@ class VectorStoreManager:
     def add_nodes(self, nodes: List[BaseNode]) -> None:
         """Add document nodes to the vector store.
 
-        Each node is embedded and indexed with its metadata.
+        Each node is embedded and indexed with its metadata. Re-upload of the
+        same content is suppressed: nodes whose text already exists in the
+        store (same source + identical content) are skipped, which is the
+        safety net that prevents re-ingestion from polluting the index even
+        when a content-hash dedup at the upload layer missed a case.
+
         Thread-safe: serializes writes via internal lock.
         """
         if not nodes:
             return
 
+        # --- De-dup guard: skip nodes whose (source, content) already exists ---
+        try:
+            by_source: dict[str, set[str]] = {}
+            for node in nodes:
+                src = node.metadata.get("source", "")
+                by_source.setdefault(src, set()).add(node.get_content())
+            existing_contents_per_source: dict[str, set[str]] = {}
+            for src, contents in by_source.items():
+                if not src:
+                    continue
+                res = self._collection.get(where={"source": src})
+                existing_contents_per_source[src] = set(res.get("documents", []) or [])
+            deduped = []
+            for node in nodes:
+                src = node.metadata.get("source", "")
+                existing = existing_contents_per_source.get(src, set())
+                if node.get_content() in existing:
+                    logger.info("Skip duplicate chunk (source=%s, %d chars)",
+                                src, len(node.get_content()))
+                    continue
+                deduped.append(node)
+            skipped = len(nodes) - len(deduped)
+            if skipped:
+                logger.info("De-dup suppressed %d duplicate chunks before add", skipped)
+        except Exception as e:
+            logger.warning("De-dup pre-check failed (%s) — adding all nodes", e)
+            deduped = list(nodes)
+
+        if not deduped:
+            logger.info("add_nodes: all %d nodes were duplicates — nothing to add", len(nodes))
+            return
+
         with self._lock:
-            self._vector_store.add(nodes)
-        logger.info("Added %d nodes to vector store", len(nodes))
+            self._vector_store.add(deduped)
+        logger.info("Added %d nodes to vector store (skipped %d duplicates)",
+                    len(deduped), len(nodes) - len(deduped))
 
     def query(
         self,
@@ -97,15 +135,28 @@ class VectorStoreManager:
         Args:
             query_embedding: Dense embedding vector.
             top_k: Number of results to return.
-            where: Optional metadata filter dict.
+            where: Optional metadata filter dict like ``{"source": "x.pdf"}``.
+                Converted to a LlamaIndex ``MetadataFilters`` (AND of equality
+                conditions) before being passed to the vector store.
 
         Returns:
             VectorStoreQueryResult with nodes, similarities, and ids.
         """
+        filters_obj = None
+        if where:
+            from llama_index.core.vector_stores.types import (
+                MetadataFilter, MetadataFilters, FilterOperator,
+            )
+            filters_obj = MetadataFilters(
+                filters=[
+                    MetadataFilter(key=k, value=v, operator=FilterOperator.EQ)
+                    for k, v in where.items()
+                ]
+            )
         q = VectorStoreQuery(
             query_embedding=query_embedding,
             similarity_top_k=top_k,
-            filters=where,
+            filters=filters_obj,
         )
         with self._lock:
             return self._vector_store.query(q)
@@ -141,3 +192,41 @@ class VectorStoreManager:
     def count(self) -> int:
         """Total number of chunks in the store."""
         return self._collection.count()
+
+    def dedup_by_content(self, dry_run: bool = False) -> int:
+        """Remove chunks with duplicate text, keeping one copy of each.
+
+        Use this once to clean legacy pollution from repeated ingestion runs
+        that happened before the upload-layer dedup was added. Returns the
+        number of chunks removed.
+
+        Args:
+            dry_run: If True, only report the count without deleting.
+        """
+        result = self._collection.get()
+        ids: list[str] = result.get("ids", []) or []
+        docs: list[str] = result.get("documents", []) or []
+        metas: list[dict] = result.get("metadatas", []) or [{} for _ in ids]
+
+        seen: dict[tuple[str, str], str] = {}  # (source, content) -> kept id
+        to_delete: list[str] = []
+        for id_, doc, meta in zip(ids, docs, metas):
+            src = (meta or {}).get("source", "")
+            key = (src, doc)
+            if key in seen:
+                to_delete.append(id_)
+            else:
+                seen[key] = id_
+
+        if dry_run:
+            logger.info("dedup dry-run: %d of %d chunks are duplicates", len(to_delete), len(ids))
+            return len(to_delete)
+
+        if to_delete:
+            # Delete in batches to avoid payload limits.
+            BATCH = 500
+            for i in range(0, len(to_delete), BATCH):
+                self._collection.delete(ids=to_delete[i:i + BATCH])
+            logger.info("Dedup: removed %d duplicate chunks (kept %d unique)",
+                        len(to_delete), len(ids) - len(to_delete))
+        return len(to_delete)
