@@ -44,10 +44,12 @@ WELCOME_MESSAGE = """# 🎓 开源课程助教 Agent
 - 🔤 保留所有英文专业术语和数学符号（$X$, $\\beta$, bias 等）
 - 📝 按四段式结构讲解：**核心流程 → 示例展开 → 数学符号 → 总结提炼**
 
-### 开始使用
-- 📎 **上传课程 PDF** — 在下方输入框旁点击 📎 或直接拖拽文件即可上传（支持多选）。重复上传同一份文件会自动跳过解析。
-- ❓ **向我提问** — 比如 "Explain gradient descent" 或 "什么是 Fourier Transform？"
-- 📚 **查看历史** — 输入 `/history` 查看历史对话、上传过的文件和讲解记录
+### 怎么开始
+- 📎 **上传课程 PDF** — 点击下方**输入框左侧的 📎 回形针图标**，或直接把 PDF 文件**拖拽**进聊天窗口。支持多选，重复上传的同一份文件会自动跳过解析。
+- ❓ **向我提问** — 直接在输入框打字后发送即可，比如 "Explain gradient descent" 或 "什么是 Fourier Transform？"
+- 📚 **查看历史** — 两种方式：
+  1. **左上角菜单 ☰** — 点开后可看到所有历史对话列表，点击切换；顶部 **「+ New chat」** 按钮可创建新对话。
+  2. 输入 `/history` — 在当前窗口内查看跨所有对话的文件清单与完整讲解记录。
 
 > ⚠️ 注意：我只针对 notes/slides/textbooks 等知识性内容讲解。Labs、homeworks 和 projects 请你自己独立实践完成。"""
 
@@ -229,7 +231,8 @@ async def on_message(message: cl.Message):
             result.get("target_topic", user_query),
         )
 
-    # Persist this Q&A pair (with a short preview of the summary) to history
+    # Persist this Q&A pair (with full four-part response) to history so that
+    # /history can re-display the exact explanation verbatim.
     try:
         summary_preview = (summary or core or "")[:200].replace("\n", " ")
         history_manager.record_qa(
@@ -237,6 +240,7 @@ async def on_message(message: cl.Message):
             query=user_query,
             topic=result.get("target_topic", user_query),
             summary_preview=summary_preview,
+            full_response=full_response,
         )
     except Exception as e:
         logger.warning("Failed to record Q&A in history: %s", e)
@@ -334,42 +338,78 @@ async def _render_history_view() -> None:
 
 
 async def _render_conversation_detail(conv: dict) -> None:
-    """Build a detailed markdown view for one conversation record."""
-    lines = [
+    """Render one conversation's files and full explanations to the chat.
+
+    Sends a header message (file table + metadata), then each Q&A as its own
+    message so the full four-part explanation renders without truncation.
+    """
+    files = conv.get("files", [])
+    qa_list = conv.get("q_and_a", [])
+
+    header_lines = [
         f"## 🗂 对话明细  `{conv.get('created_at', '')}`\n",
         f"- Thread: `{conv.get('thread_id', '')}`",
         f"- 创建时间: {conv.get('created_at', '?')}",
         f"- 更新时间: {conv.get('updated_at', '?')}",
+        "\n### 📄 上传的文件\n",
     ]
-
-    files = conv.get("files", [])
-    lines.append("\n### 📄 上传的文件\n")
     if not files:
-        lines.append("- 无")
+        header_lines.append("- 无")
     else:
-        lines.append("| 文件名 | Chunks | 内容指纹(前12位) |")
-        lines.append("|---|---|---|")
+        header_lines.append("| 文件名 | Chunks | 内容指纹(前12位) |")
+        header_lines.append("|---|---|---|")
         for f in files:
             h = (f.get("hash") or "")[:12]
-            lines.append(f"| {f.get('name','')} | {f.get('chunks','')} | `{h}` |")
+            header_lines.append(f"| {f.get('name','')} | {f.get('chunks','')} | `{h}` |")
 
-    qa_list = conv.get("q_and_a", [])
-    lines.append("\n### 💬 提问与讲解摘要\n")
-    if not qa_list:
-        lines.append("- 该对话还没有提问记录。")
-    else:
-        for i, qa in enumerate(qa_list, start=1):
-            lines.append(f"**Q{i}.** `{qa.get('time','')}` — 主题: {qa.get('topic','')}")
-            lines.append(f"> 问：{qa.get('query','')}")
-            preview = qa.get("summary_preview", "")
-            if preview:
-                lines.append(f"> 讲解摘要：{preview}…")
-            lines.append("")
-
-    lines.append(
-        "\n---\n"
-        "💡 提示：本对话的所有文件已索引进向量库。开启新对话时重新上传同一份 PDF "
-        "会被自动跳过，无需手动去重。如需在原对话上继续追问，请回到该对话窗口。"
+    header_lines.append(
+        "\n### 💬 提问与讲解（共 {} 条）\n".format(len(qa_list))
     )
+    if not qa_list:
+        header_lines.append("- 该对话还没有提问记录。")
+    await cl.Message(content="\n".join(header_lines), author="历史").send()
 
-    await cl.Message(content="\n".join(lines)).send()
+    # Stream each Q&A as its own message so full LaTeX renders and long
+    # content is not truncated by a single-message size cap.
+    MAX_MSG = 3900
+    for i, qa in enumerate(qa_list, start=1):
+        qtext = qa.get("query", "")
+        topic = qa.get("topic", "")
+        when = qa.get("time", "")
+        full = qa.get("full_response", "")
+
+        head = (
+            f"#### Q{i}. `{when}` — 主题：{topic}\n"
+            f"> **问：** {qtext}\n"
+        )
+        if full:
+            body = f"{head}\n**讲解：**\n\n{full}"
+        else:
+            preview = qa.get("summary_preview", "")
+            body = f"{head}\n> 讲解摘要：{preview}…" if preview else head
+
+        # Split very long bodies across multiple messages to stay under the
+        # Chainlit rendering size limit, on `---` section boundaries.
+        if len(body) <= MAX_MSG:
+            await cl.Message(content=body, author="历史").send()
+        else:
+            chunks = body.split("\n\n---\n\n")
+            buf = head + "\n"
+            for j, chunk in enumerate(chunks):
+                if len(buf) + len(chunk) + 4 > MAX_MSG and buf.strip():
+                    await cl.Message(content=buf, author="历史").send()
+                    buf = ""
+                buf = (buf + "\n\n---\n\n" + chunk) if buf else chunk
+            if buf.strip():
+                await cl.Message(content=buf, author="历史").send()
+        await asyncio.sleep(0.2)
+
+    await cl.Message(
+        content=(
+            "\n---\n"
+            "💡 提示：本对话的所有文件已索引进向量库。\n"
+            "- 在左上角菜单中可切换到其它历史对话继续追问。\n"
+            "- 重新上传同一份 PDF 会被自动跳过，无需手动去重。"
+        ),
+        author="历史",
+    ).send()

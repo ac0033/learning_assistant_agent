@@ -147,8 +147,15 @@ class HistoryManager:
                         name, content_hash[:12], thread_id)
 
     def record_qa(self, thread_id: str, query: str, topic: str,
-                  summary_preview: str = "") -> None:
-        """Append a Q&A entry to a conversation record."""
+                  summary_preview: str = "",
+                  full_response: str = "") -> None:
+        """Append a Q&A entry to a conversation record.
+
+        Args:
+            full_response: the complete four-part teaching output as rendered
+                to the UI. Stored so /history can re-display it verbatim
+                without re-running the agent.
+        """
         with self._lock:
             convs = self._load_conversations()
             conv = convs.get(thread_id)
@@ -156,12 +163,15 @@ class HistoryManager:
                 conv = self.create_conversation(thread_id)
                 convs = self._load_conversations()
                 conv = convs[thread_id]
-            conv.setdefault("q_and_a", []).append({
+            entry: dict[str, Any] = {
                 "time": _utcnow_iso(),
                 "query": query,
                 "topic": topic,
                 "summary_preview": summary_preview,
-            })
+            }
+            if full_response:
+                entry["full_response"] = full_response
+            conv.setdefault("q_and_a", []).append(entry)
             conv["updated_at"] = _utcnow_iso()
             self._save_conversations(convs)
 
