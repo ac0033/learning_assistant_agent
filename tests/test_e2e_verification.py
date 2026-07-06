@@ -348,12 +348,10 @@ def _():
     assert_eq(settings.embedding_model, "BAAI/bge-m3", "embedding_model")
 
 
-@test("settings.anthropic_base_url = 'https://api.deepseek.com/anthropic'")
+@test("settings.anthropic_base_url is non-empty (provider-agnostic)")
 def _():
     from config.settings import settings
-    assert_eq(settings.anthropic_base_url,
-              "https://api.deepseek.com/anthropic",
-              "anthropic_base_url")
+    assert settings.anthropic_base_url, "anthropic_base_url must be set (DeepSeek/OpenRouter/Anthropic)"
 
 
 @test("settings.validate_runtime() — no exception")
