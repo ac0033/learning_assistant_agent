@@ -41,6 +41,10 @@ class TeachingState(TypedDict, total=False):
     examples: str                       # Part ②: Interspersed Examples
     math_notation: str                  # Part ③: Math & Notation
     section_summary: str                # Part ④: Summary
+    supplementary_text: str             # Optional appendix: extra context drawn
+                                        # from files uploaded in OTHER conversations
+                                        # (extension feature; never affects the main
+                                        # four-part teaching)
 
     # --- Flow Control ---
     current_node: str                   # Which node is currently executing
@@ -52,3 +56,4 @@ class TeachingState(TypedDict, total=False):
     iteration_count: int
     user_feedback: str                  # Optional feedback from user for iterative improvement
     thread_id: str                      # Current conversation thread id (per-session file isolation)
+    supplementary_enabled: bool         # Whether to append a history-sourced supplementary section

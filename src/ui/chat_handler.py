@@ -34,6 +34,10 @@ _session_manager = SessionManager()
 # Commands that open the conversation history view (instead of teaching)
 HISTORY_COMMANDS = {"/history", "/历史", "查看历史", "历史记录", "查看历史记录"}
 
+# Commands that toggle the supplementary-from-history extension feature.
+# /supplement with no argument shows current status.
+SUPPLEMENT_COMMANDS = {"/supplement", "/补充"}
+
 # Welcome message template
 WELCOME_MESSAGE = """# 🎓 开源课程助教 Agent
 
@@ -151,6 +155,12 @@ async def on_message(message: cl.Message):
         await _render_history_view()
         return
 
+    # -- Step 1c: Supplement toggle command — enable/disable the history-sourced
+    #             supplementary section (extension feature).
+    if user_query.lower() in SUPPLEMENT_COMMANDS or user_query.lower().startswith("/supplement"):
+        await _handle_supplement_command(user_query)
+        return
+
     logger.info("Received query [thread=%s]: %s", thread_id, user_query[:100])
 
     # -- Step 2: Show thinking indicator --
@@ -160,8 +170,18 @@ async def on_message(message: cl.Message):
     # -- Step 3: Run the teaching pipeline --
     agent = _get_agent()
 
+    # Read the supplementary-feature toggle from the user session (set by the
+    # /supplement command); fall back to the global setting default.
+    supplement_on = cl.user_session.get("supplementary_enabled")
+    if supplement_on is None:
+        from config.settings import settings as _settings
+        supplement_on = _settings.supplementary_from_history
+
     try:
-        result = await agent.ateach(user_query, thread_id=thread_id)
+        result = await agent.ateach(
+            user_query, thread_id=thread_id,
+            supplementary_enabled=supplement_on,
+        )
     except Exception as e:
         logger.error("Teaching pipeline failed: %s", e)
         thinking_msg.content = f"❌ 处理你的问题时遇到错误: {str(e)}"
@@ -255,7 +275,62 @@ async def on_message(message: cl.Message):
             author="系统",
         ).send()
 
+    # Append the supplementary-from-history section (extension feature).
+    # This is drawn from files uploaded in OTHER conversations and only
+    # appears when the feature is enabled and produced non-empty content.
+    supplementary = (result.get("supplementary_text") or "").strip()
+    if supplementary:
+        await cl.Message(content=supplementary, author="系统").send()
+
     logger.info("Response sent [thread=%s]: %d chars", thread_id, len(full_response))
+
+
+async def _handle_supplement_command(user_query: str) -> None:
+    """Toggle the supplementary-from-history extension feature.
+
+    Accepted forms:
+      /supplement         — show current status
+      /supplement on      — enable
+      /supplement off     — disable
+    """
+    from config.settings import settings as _settings
+    parts = user_query.strip().split()
+    current = cl.user_session.get("supplementary_enabled")
+    if current is None:
+        current = _settings.supplementary_from_history
+
+    if len(parts) <= 1:
+        status = "开启 ✅" if current else "关闭 ❌"
+        await cl.Message(
+            content=(
+                f"**历史材料补充** 当前状态：{status}\n\n"
+                "用法：\n"
+                "- `/supplement on` — 开启：讲解末尾会追加一段来自其他对话已上传材料的补充参考\n"
+                "- `/supplement off` — 关闭：只使用当前对话上传的材料讲解\n\n"
+                "说明：开启时，主线四段讲解不受影响，仅在最后额外补充交叉参考。"
+            ),
+            author="系统",
+        ).send()
+        return
+
+    arg = parts[1].lower()
+    if arg in ("on", "开", "开启", "true", "1"):
+        cl.user_session.set("supplementary_enabled", True)
+        await cl.Message(
+            content="✅ 已**开启**历史材料补充。下次讲解末尾会追加来自其他对话材料的补充参考。",
+            author="系统",
+        ).send()
+    elif arg in ("off", "关", "关闭", "false", "0"):
+        cl.user_session.set("supplementary_enabled", False)
+        await cl.Message(
+            content="❌ 已**关闭**历史材料补充。之后讲解只使用当前对话上传的材料。",
+            author="系统",
+        ).send()
+    else:
+        await cl.Message(
+            content="⚠️ 无法识别的参数。用法：`/supplement on` 或 `/supplement off`",
+            author="系统",
+        ).send()
 
 
 async def _render_history_view() -> None:

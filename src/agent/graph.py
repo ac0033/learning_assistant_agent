@@ -24,6 +24,7 @@ from .nodes import (
     example_generation_node,
     math_notation_node,
     summary_transition_node,
+    supplementary_retrieval_node,
 )
 
 logger = logging.getLogger(__name__)
@@ -130,6 +131,7 @@ def build_graph() -> StateGraph:
     graph_builder.add_node("example_generation", example_generation_node)
     graph_builder.add_node("math_notation", math_notation_node)
     graph_builder.add_node("summary_transition", summary_transition_node)
+    graph_builder.add_node("supplementary_retrieval", supplementary_retrieval_node)
 
     # --- Add edges ---
     # Entry point
@@ -178,8 +180,13 @@ def build_graph() -> StateGraph:
     # Math → summary (always)
     graph_builder.add_edge("math_notation", "summary_transition")
 
-    # Summary → END (always)
-    graph_builder.add_edge("summary_transition", END)
+    # Summary → supplementary retrieval (extension feature: appends an optional
+    # cross-conversation reference block; never affects the main four-part
+    # teaching which is already complete at this point).
+    graph_builder.add_edge("summary_transition", "supplementary_retrieval")
+
+    # Supplementary → END (always)
+    graph_builder.add_edge("supplementary_retrieval", END)
 
     # Compile with memory for conversation persistence
     memory = MemorySaver()
@@ -205,20 +212,28 @@ class TeachingAgent:
     def graph(self):
         return self._graph
 
-    async def ateach(self, user_query: str, thread_id: str = "default") -> dict[str, Any]:
+    async def ateach(self, user_query: str, thread_id: str = "default",
+                     supplementary_enabled: bool | None = None) -> dict[str, Any]:
         """Run the teaching pipeline for a student query.
 
         Args:
             user_query: The student's question or topic request.
             thread_id: Conversation thread ID for session persistence.
+            supplementary_enabled: Override the supplementary-from-history
+                feature for this call. ``None`` uses the global default from
+                settings (``SUPPLEMENTARY_FROM_HISTORY``).
 
         Returns:
             Final TeachingState with all four parts populated.
         """
+        from config.settings import settings as _settings
+        if supplementary_enabled is None:
+            supplementary_enabled = _settings.supplementary_from_history
         initial_state: TeachingState = {
             "user_query": user_query,
             "iteration_count": 0,
             "thread_id": thread_id,
+            "supplementary_enabled": supplementary_enabled,
         }
 
         config = {"configurable": {"thread_id": thread_id}}
@@ -226,17 +241,22 @@ class TeachingAgent:
         result = await self._graph.ainvoke(initial_state, config)
         return result
 
-    async def astream_teach(self, user_query: str, thread_id: str = "default"):
+    async def astream_teach(self, user_query: str, thread_id: str = "default",
+                            supplementary_enabled: bool | None = None):
         """Stream the teaching pipeline, yielding events as nodes execute.
 
         Yields events of type:
             - "on_chain_start" / "on_chain_end": node boundaries
             - "on_chat_model_stream": LLM token streaming (for UI)
         """
+        from config.settings import settings as _settings
+        if supplementary_enabled is None:
+            supplementary_enabled = _settings.supplementary_from_history
         initial_state: TeachingState = {
             "user_query": user_query,
             "iteration_count": 0,
             "thread_id": thread_id,
+            "supplementary_enabled": supplementary_enabled,
         }
 
         config = {"configurable": {"thread_id": thread_id}}

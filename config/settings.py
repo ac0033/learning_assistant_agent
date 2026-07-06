@@ -53,6 +53,22 @@ class Settings(BaseSettings):
     chunk_size: int = Field(default=1024, description="Target chunk size in tokens")
     chunk_overlap: int = Field(default=128, description="Chunk overlap in tokens")
 
+    # --- Supplementary from history (extension feature) ---
+    # When True, after the main four-part teaching the agent additionally
+    # retrieves from files uploaded in *other* conversations and appends a
+    # short "supplementary" section to the response. The main teaching is
+    # never affected; this only adds an extra reference block at the end.
+    # Users can toggle at runtime via the /supplement command.
+    supplementary_from_history: bool = Field(
+        default=True,
+        alias="SUPPLEMENTARY_FROM_HISTORY",
+        description="Append a supplementary section drawing on files from other conversations.",
+    )
+    supplementary_top_k: int = Field(
+        default=3,
+        description="Number of supplementary chunks to retrieve from history.",
+    )
+
     # --- Paths ---
     project_root: Path = Path(__file__).resolve().parent.parent
     data_dir: Path = Field(default_factory=lambda: Path(__file__).resolve().parent.parent / "data")

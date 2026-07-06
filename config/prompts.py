@@ -213,3 +213,27 @@ No specific course materials were retrieved for this query. Respond helpfully:
 - If this is a conceptual question, answer from your own knowledge using the four-part structure.
 - If this is about course logistics, provide helpful guidance.
 - Always maintain your TA persona."""
+
+# ============================================================================
+# Supplementary from History Prompt (extension feature)
+# ============================================================================
+
+SUPPLEMENTARY_PROMPT = """You have just finished a four-part teaching explanation for the student's question:
+
+Student question: {user_query}
+
+Your main explanation summary:
+{section_summary}
+
+Below are excerpts retrieved from OTHER course materials the student uploaded in earlier conversations (NOT the current conversation's files). These are provided as optional cross-references that may broaden or reinforce the topic.
+
+Retrieved excerpts from history materials:
+{supplementary_context}
+
+Write a SHORT supplementary note (3-6 sentences, in Chinese) that:
+- Points out 1-2 connections, contrasts, or extensions these other materials offer to what you just taught.
+- Explicitly names the source file(s) each point comes from so the student can locate them.
+- Does NOT repeat or restate the main explanation — only adds new angles.
+- If the excerpts are not genuinely relevant, say so briefly and suggest the student upload the relevant material.
+
+Format: a single paragraph. Begin with a clear marker line exactly: "📖 补充参考（来自历史材料）：" then the paragraph."""
