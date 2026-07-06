@@ -51,3 +51,4 @@ class TeachingState(TypedDict, total=False):
     # --- Session Tracking ---
     iteration_count: int
     user_feedback: str                  # Optional feedback from user for iterative improvement
+    thread_id: str                      # Current conversation thread id (per-session file isolation)

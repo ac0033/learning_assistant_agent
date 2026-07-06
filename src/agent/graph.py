@@ -218,6 +218,7 @@ class TeachingAgent:
         initial_state: TeachingState = {
             "user_query": user_query,
             "iteration_count": 0,
+            "thread_id": thread_id,
         }
 
         config = {"configurable": {"thread_id": thread_id}}
@@ -235,6 +236,7 @@ class TeachingAgent:
         initial_state: TeachingState = {
             "user_query": user_query,
             "iteration_count": 0,
+            "thread_id": thread_id,
         }
 
         config = {"configurable": {"thread_id": thread_id}}

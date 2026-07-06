@@ -65,25 +65,40 @@ async def document_retrieval_node(state: TeachingState) -> dict[str, Any]:
     Uses the target_topic from query understanding to retrieve
     the most relevant sections from uploaded course materials.
 
-    If the student explicitly names a file (e.g. "讲讲 xxx.pdf 第2部分"),
-    retrieval is restricted to that source so other files' chunks don't
-    dilute the ranking.
+    Per-conversation isolation: retrieval is restricted to the files the
+    student actually uploaded in the *current* conversation (looked up via
+    ``history_manager.get_thread_files``). A fresh conversation with no
+    uploads yields an empty result so the agent falls back to direct LLM
+    response — chunks from other conversations are never mixed in. This is
+    the core fix for cross-conversation contamination.
+
+    If the student explicitly names a file (e.g. "讲讲 xxx.pdf 第2部分")
+    that is among the current conversation's files, retrieval is further
+    restricted to that single source.
 
     Returns updated state with retrieved_chunks.
     """
     target_topic = state.get("target_topic", "")
     user_query = state.get("user_query", "")
+    thread_id = state.get("thread_id", "default")
 
     # Build effective retrieval query
     retrieval_query = f"{target_topic} {user_query}"
 
-    logger.info("[DocumentRetrieval] Retrieving for: %s", retrieval_query[:120])
+    logger.info("[DocumentRetrieval] Retrieving for: %s (thread=%s)",
+                retrieval_query[:120], thread_id)
+
+    # --- Per-conversation file isolation --------------------------------
+    # Only the files the student uploaded in THIS conversation may be
+    # retrieved. Files uploaded in other conversations live in the same
+    # global ChromaDB collection but are excluded here by a source whitelist.
+    from src.ui.history_manager import history_manager
+    allowed_sources: list[str] = history_manager.get_thread_files(thread_id)
+    allowed_set: set[str] = set(allowed_sources)
 
     retriever = _get_retriever()
-    vsm = VectorStoreManager()
-    known_sources = vsm.list_sources()
 
-    # If no documents indexed, return empty
+    # If no documents indexed at all, return empty
     if not retriever._bm25.is_initialized():
         logger.warning("[DocumentRetrieval] No documents indexed — returning empty")
         return {
@@ -92,10 +107,35 @@ async def document_retrieval_node(state: TeachingState) -> dict[str, Any]:
             "current_node": "document_retrieval",
         }
 
-    # Detect if the student pointed at a specific uploaded file.
-    source_filter = _detect_referenced_source(user_query, known_sources)
+    # If this conversation has no uploaded files, strict isolation: return
+    # empty so the explanation node falls back to DIRECT_RESPONSE (pure LLM
+    # answer). Historical files from other threads must NOT leak in.
+    if not allowed_set:
+        logger.info("[DocumentRetrieval] Thread '%s' has no uploaded files — "
+                    "strict isolation, returning empty (LLM will self-answer)",
+                    thread_id)
+        return {
+            "retrieved_chunks": [],
+            "retrieval_query": retrieval_query,
+            "current_node": "document_retrieval",
+            "teaching_phase": "retrieved",
+        }
+
+    # Detect if the student pointed at a specific file *within this
+    # conversation's files*. A named file that wasn't uploaded here is not
+    # honored (strict isolation per product decision).
+    source_filter = _detect_referenced_source(user_query, allowed_sources)
     if source_filter:
-        logger.info("[DocumentRetrieval] Query references source '%s' — restricting retrieval", source_filter)
+        logger.info("[DocumentRetrieval] Query references source '%s' — "
+                    "restricting retrieval", source_filter)
+    else:
+        # Student may have named a file that exists globally but not in this
+        # thread; log it for debugging but do not relax isolation.
+        vsm = VectorStoreManager()
+        global_hit = _detect_referenced_source(user_query, vsm.list_sources())
+        if global_hit and global_hit not in allowed_set:
+            logger.info("[DocumentRetrieval] Query names '%s' which is not in "
+                        "this thread's files — isolation maintained", global_hit)
 
     # When section diversity is needed, pull a wider candidate pool from the
     # retriever so that lower-scored chunks from other sections are available
@@ -104,15 +144,18 @@ async def document_retrieval_node(state: TeachingState) -> dict[str, Any]:
     final_k_override = None
     if source_filter:
         final_k_override = max(settings_retrieval_top_k * 4, 20)
-    elif len(known_sources) > 1:
+    elif len(allowed_sources) > 1:
         final_k_override = max(settings_retrieval_top_k * 2, 10)
 
-    # Execute hybrid retrieval (with optional source filter + wider pool)
+    # Execute hybrid retrieval with the per-conversation source whitelist.
+    # source_whitelist enforces isolation; source_filter (if set and in the
+    # whitelist) further narrows to a single file inside the retriever.
     try:
         results = retriever.retrieve(
             retrieval_query,
             source_filter=source_filter,
             final_k=final_k_override,
+            source_whitelist=allowed_set,
         )
     except Exception as e:
         logger.error("[DocumentRetrieval] Retrieval failed: %s", e)
@@ -123,14 +166,12 @@ async def document_retrieval_node(state: TeachingState) -> dict[str, Any]:
         }
 
     # Source diversity (Fix3): cap per-source hits so other uploaded files
-    # also contribute when no explicit filter was requested.
-    if not source_filter and len(known_sources) > 1:
+    # (within this conversation) also contribute when no explicit filter.
+    if not source_filter and len(allowed_sources) > 1:
         results = _enforce_source_diversity(results, max_per_source=3)
 
     # Section diversity (Fix2b): when retrieval is restricted to a single
     # file, ensure chunks from multiple top-level sections are represented.
-    # Without this, the LLM gets 5 chunks all from one section and cannot
-    # distinguish "part 2" vs "part 3".
     if source_filter:
         results = _enforce_section_diversity(results, max_per_top_section=2)
 
@@ -149,10 +190,10 @@ async def document_retrieval_node(state: TeachingState) -> dict[str, Any]:
             relevance_score=round(r.score or 0.0, 4),
         ))
 
-    # Fix3: tell the LLM which OTHER uploaded materials exist (so it can
-    # cross-reference them when explaining). Inject as a synthetic context
-    # entry only when multiple sources are indexed and not all returned.
-    other_sources = [s for s in known_sources if s != source_filter] if len(known_sources) > 1 else []
+    # Fix3: tell the LLM which OTHER uploaded materials (in this conversation)
+    # exist so it can cross-reference them when explaining. Only inject when
+    # this conversation has multiple files and not all were returned.
+    other_sources = [s for s in allowed_sources if s != source_filter] if len(allowed_sources) > 1 else []
     if chunks and other_sources:
         other_text = "[Other available course materials you may cross-reference: " + ", ".join(other_sources) + "]"
         chunks.insert(0, RetrievedContext(
@@ -163,8 +204,10 @@ async def document_retrieval_node(state: TeachingState) -> dict[str, Any]:
         ))
 
     logger.info(
-        "[DocumentRetrieval] Found %d relevant chunks (top score=%.3f)",
-        len(chunks), chunks[0]["relevance_score"] if chunks else 0.0
+        "[DocumentRetrieval] Found %d relevant chunks (top score=%.3f) "
+        "from thread files=%s",
+        len(chunks), chunks[0]["relevance_score"] if chunks else 0.0,
+        allowed_sources,
     )
 
     return {

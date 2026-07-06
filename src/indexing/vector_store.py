@@ -136,8 +136,9 @@ class VectorStoreManager:
             query_embedding: Dense embedding vector.
             top_k: Number of results to return.
             where: Optional metadata filter dict like ``{"source": "x.pdf"}``.
-                Converted to a LlamaIndex ``MetadataFilters`` (AND of equality
-                conditions) before being passed to the vector store.
+                Each value may be a scalar (equality) or a list/tuple/set
+                (translated to a ``$in`` membership filter for ChromaDB).
+                Multiple keys are combined with AND.
 
         Returns:
             VectorStoreQueryResult with nodes, similarities, and ids.
@@ -147,12 +148,27 @@ class VectorStoreManager:
             from llama_index.core.vector_stores.types import (
                 MetadataFilter, MetadataFilters, FilterOperator,
             )
-            filters_obj = MetadataFilters(
-                filters=[
-                    MetadataFilter(key=k, value=v, operator=FilterOperator.EQ)
-                    for k, v in where.items()
-                ]
-            )
+            filter_list = []
+            for k, v in where.items():
+                if isinstance(v, (list, tuple, set)):
+                    vals = [str(x) for x in v] if v else []
+                    if not vals:
+                        # Empty whitelist -> match nothing. Use an impossible
+                        # value so ChromaDB returns zero results.
+                        filter_list.append(
+                            MetadataFilter(key=k, value="__none__",
+                                           operator=FilterOperator.EQ)
+                        )
+                    else:
+                        filter_list.append(
+                            MetadataFilter(key=k, value=vals,
+                                           operator=FilterOperator.IN)
+                        )
+                else:
+                    filter_list.append(
+                        MetadataFilter(key=k, value=v, operator=FilterOperator.EQ)
+                    )
+            filters_obj = MetadataFilters(filters=filter_list)
         q = VectorStoreQuery(
             query_embedding=query_embedding,
             similarity_top_k=top_k,

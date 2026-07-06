@@ -142,18 +142,32 @@ class HybridRetriever:
             self._bm25.index(nodes)
 
     def retrieve(self, query: str, source_filter: Optional[str] = None,
-                final_k: Optional[int] = None) -> List[NodeWithScore]:
+                 final_k: Optional[int] = None,
+                 source_whitelist: Optional[set] = None) -> List[NodeWithScore]:
         """Execute hybrid retrieval for a query.
 
         Args:
             query: The search query string.
             source_filter: If given, restrict retrieval to chunks whose
                 ``metadata['source']`` equals this filename. Used when the
-                student explicitly names a PDF in their query.
+                student explicitly names a PDF in their query. (Legacy mode;
+                ignored when ``source_whitelist`` is provided.)
             final_k: Override the default final-k (reranker output size).
                 Pass a larger value when the caller wants a wider candidate
                 pool to apply its own diversity post-selection (e.g. ensuring
                 chunks from multiple sections are represented).
+            source_whitelist: Per-conversation isolation control.
+
+                * ``None``  — legacy/global mode: retrieve across all indexed
+                  sources (no thread isolation). Kept for backward
+                  compatibility and for the supplementary-from-history
+                  extension feature.
+                * Empty set — strict isolation: the current conversation has
+                  no uploaded files, so return ``[]`` immediately. This is
+                  the core fix for cross-conversation contamination.
+                * Non-empty set — only retrieve chunks whose
+                  ``metadata['source']`` is in this set (the files the student
+                  actually uploaded in the current conversation).
 
         Returns:
             List of NodeWithScore, sorted by relevance (highest first).
@@ -162,16 +176,46 @@ class HybridRetriever:
             logger.warning("BM25 index is empty—returning empty results")
             return []
 
-        dense_where = {"source": source_filter} if source_filter else None
+        # --- Determine effective source filtering -------------------------
+        # source_whitelist takes precedence over source_filter when provided.
+        if source_whitelist is not None:
+            if len(source_whitelist) == 0:
+                # Strict per-thread isolation: this conversation has no
+                # uploaded files, so no retrieval is allowed at all.
+                logger.info("Hybrid retrieval: empty source_whitelist → "
+                            "strict isolation, returning []")
+                return []
+            effective_sources: Optional[set] = set(source_whitelist)
+            # If the student named a file that is actually in this thread,
+            # narrow the whitelist to that single file.
+            if source_filter and source_filter in effective_sources:
+                effective_sources = {source_filter}
+            dense_where = {"source": list(effective_sources)}
+            sparse_whitelist = effective_sources
+            # post-filter shrinks the candidate pool, so widen it to keep
+            # the reranker fed.
+            candidate_k = self._candidate_k * 2
+        else:
+            # Legacy / global mode (no thread isolation).
+            if source_filter:
+                dense_where = {"source": source_filter}
+                sparse_whitelist = {source_filter}
+            else:
+                dense_where = None
+                sparse_whitelist = None
+            candidate_k = self._candidate_k
+
         out_k = final_k if final_k is not None else self._final_k
 
         # Step 1: Dense retrieval (with optional metadata filter)
-        dense_results = self._dense_search(query, top_k=self._candidate_k, where=dense_where)
+        dense_results = self._dense_search(query, top_k=candidate_k, where=dense_where)
 
         # Step 2: Sparse retrieval. BM25 keeps an in-memory node list, so we
-        # post-filter its results to the requested source (cheaper than
+        # post-filter its results to the requested source(s) (cheaper than
         # rebuilding the index per source).
-        sparse_results = self._sparse_search(query, top_k=self._candidate_k, source_filter=source_filter)
+        sparse_results = self._sparse_search(
+            query, top_k=candidate_k, source_whitelist=sparse_whitelist,
+        )
 
         # Step 3: RRF fusion
         fused = self._reciprocal_rank_fusion(dense_results, sparse_results, k=60)
@@ -180,8 +224,11 @@ class HybridRetriever:
         final = self._reranker.rerank(query, fused, top_k=out_k)
 
         logger.info(
-            "Hybrid retrieval (source=%s, final_k=%d): dense=%d, sparse=%d, fused=%d, final=%d",
-            source_filter or "ALL", out_k, len(dense_results), len(sparse_results), len(fused), len(final)
+            "Hybrid retrieval (whitelist=%s, source_filter=%s, final_k=%d): "
+            "dense=%d, sparse=%d, fused=%d, final=%d",
+            effective_sources if source_whitelist is not None else "GLOBAL",
+            source_filter or "ALL", out_k, len(dense_results),
+            len(sparse_results), len(fused), len(final)
         )
 
         return final
@@ -204,8 +251,17 @@ class HybridRetriever:
                 nodes.append(NodeWithScore(node=node, score=similarity or 0.0))
         return nodes
 
-    def _sparse_search(self, query: str, top_k: int, source_filter: Optional[str] = None) -> List[NodeWithScore]:
-        """BM25 exact/partial match search. Errors are isolated — returns [] on failure."""
+    def _sparse_search(self, query: str, top_k: int,
+                       source_whitelist: Optional[set] = None,
+                       source_filter: Optional[str] = None) -> List[NodeWithScore]:
+        """BM25 exact/partial match search. Errors are isolated — returns [] on failure.
+
+        Args:
+            source_whitelist: If provided (a set), keep only nodes whose
+                ``metadata['source']`` is in this set. Takes precedence over
+                ``source_filter``.
+            source_filter: Legacy single-source post-filter.
+        """
         try:
             results = self._bm25.search(query, top_k=top_k)
         except Exception as e:
@@ -216,7 +272,11 @@ class HybridRetriever:
         for idx, score in results:
             if score > 0:
                 node = self._bm25._nodes[idx]
-                if source_filter and node.metadata.get("source") != source_filter:
+                src = node.metadata.get("source")
+                if source_whitelist is not None:
+                    if src not in source_whitelist:
+                        continue
+                elif source_filter and src != source_filter:
                     continue
                 nodes.append(NodeWithScore(node=node, score=score))
         return nodes

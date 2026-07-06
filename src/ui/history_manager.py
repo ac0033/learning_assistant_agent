@@ -25,7 +25,7 @@ from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()
 
 
 def _history_dir() -> Path:
@@ -121,6 +121,19 @@ class HistoryManager:
     def get_conversation(self, thread_id: str) -> Optional[dict]:
         with self._lock:
             return self._load_conversations().get(thread_id)
+
+    def get_thread_files(self, thread_id: str) -> list[str]:
+        """Return the list of file names registered to a conversation thread.
+
+        Used by the retrieval layer to restrict retrieval to the files the
+        student actually uploaded in the current conversation, preventing
+        cross-conversation contamination from globally shared ChromaDB.
+        Returns an empty list for a fresh conversation with no uploads.
+        """
+        conv = self.get_conversation(thread_id)
+        if not conv:
+            return []
+        return [f["name"] for f in conv.get("files", []) if f.get("name")]
 
     def register_file(self, thread_id: str, name: str, content_hash: str,
                       chunks: int) -> None:
