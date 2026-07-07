@@ -10,7 +10,7 @@ from typing import Any
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from ..state import TeachingState
-from ...utils import retry_async, create_llm, extract_text, render_prompt
+from ...utils import retry_async, create_llm, extract_text, is_truncated, render_prompt
 from config.prompts import TEACHING_SYSTEM_PROMPT, MATH_NOTATION_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,10 @@ async def math_notation_node(state: TeachingState) -> dict[str, Any]:
 
     logger.info("[MathNotation] Generating math notation for: %s", user_query[:80])
 
-    llm = create_llm(temperature=0.3, max_tokens=3000)
+    # 6000-token budget: Part ③ routinely contains many numbered subsections
+    # (e.g. "5. 你可能会遇到的符号变体"); the previous 3000 cap truncated
+    # mid-subsection, making the output jump to ④ Summary prematurely.
+    llm = create_llm(temperature=0.3, max_tokens=6000)
 
     prompt = render_prompt(
         MATH_NOTATION_PROMPT,
@@ -43,6 +46,13 @@ async def math_notation_node(state: TeachingState) -> dict[str, Any]:
     ]))
 
     math_notation = extract_text(response)
+
+    if is_truncated(response):
+        logger.warning(
+            "[MathNotation] Output truncated at max_tokens=6000 (%d chars) — "
+            "Part ③ may be incomplete; consider raising the budget.",
+            len(math_notation),
+        )
 
     logger.info("[MathNotation] Generated %d chars of math notation", len(math_notation))
 

@@ -70,6 +70,53 @@ def _get_agent() -> TeachingAgent:
     return _agent
 
 
+def _split_long_body(body: str, max_len: int) -> list[str]:
+    """Split a long teaching body into chunks that each fit a Chainlit message.
+
+    First splits on the four-part section boundary ``\\n\\n---\\n\\n``. If any
+    single section still exceeds ``max_len`` (e.g. Part ③ with many numbered
+    subsections), it is further split on blank-line (``\\n\\n``) boundaries so
+    the UI does not silently truncate a long part mid-content. Code-block
+    fences are not split mid-fence.
+    """
+    chunks: list[str] = []
+    for section in body.split("\n\n---\n\n"):
+        section = section.strip()
+        if not section:
+            continue
+        if len(section) <= max_len:
+            chunks.append(section)
+            continue
+        # Section too long — split on blank lines, keeping code fences intact.
+        in_fence = False
+        fence_marker = ""
+        buf = ""
+        for piece in section.split("\n\n"):
+            stripped_first_line = piece.split("\n", 1)[0].strip()
+            if stripped_first_line.startswith("```"):
+                # Toggle fence state based on the opening marker.
+                marker = stripped_first_line.split("```", 1)[0] or "```"
+                if not in_fence:
+                    in_fence = True
+                    fence_marker = marker
+                elif stripped_first_line == fence_marker:
+                    in_fence = False
+                    fence_marker = ""
+            sep = "\n\n"
+            if buf:
+                candidate = buf + sep + piece
+            else:
+                candidate = piece
+            if len(candidate) > max_len and buf:
+                chunks.append(buf)
+                buf = piece
+            else:
+                buf = candidate
+        if buf.strip():
+            chunks.append(buf)
+    return chunks
+
+
 @cl.on_chat_start
 async def on_chat_start():
     """Initialize a new chat session.
@@ -231,10 +278,13 @@ async def on_message(message: cl.Message):
     # -- Step 5: Display the response --
     await thinking_msg.remove()
 
-    # If response is too long, split into multiple messages
+    # If response is too long, split into multiple messages. Use the shared
+    # splitter so a single oversized Part (e.g. ③ with many subsections) is
+    # further split on blank-line boundaries instead of being sent as one
+    # message that Chainlit may silently truncate mid-content.
     MAX_MSG_LENGTH = 4000
     if len(full_response) > MAX_MSG_LENGTH:
-        sections = full_response.split("\n\n---\n\n")
+        sections = _split_long_body(full_response, MAX_MSG_LENGTH)
         for i, section in enumerate(sections):
             if section.strip():
                 await cl.Message(content=section.strip()).send()
@@ -412,6 +462,22 @@ async def _render_history_view() -> None:
     await _render_conversation_detail(conv)
 
 
+# --- Navigation action callbacks ---------------------------------------------
+# Both buttons re-render the /history overview. Chainlit's default frontend
+# has no scroll-to-top API, so "返回顶部" is implemented semantically as
+# "return to the top of the history flow" (i.e. the overview list).
+@cl.action_callback("back_to_history")
+async def _on_back_to_history(action: cl.Action):
+    await action.remove()
+    await _render_history_view()
+
+
+@cl.action_callback("back_to_top")
+async def _on_back_to_top(action: cl.Action):
+    await action.remove()
+    await _render_history_view()
+
+
 async def _render_conversation_detail(conv: dict) -> None:
     """Render one conversation's files and full explanations to the chat.
 
@@ -420,6 +486,22 @@ async def _render_conversation_detail(conv: dict) -> None:
     """
     files = conv.get("files", [])
     qa_list = conv.get("q_and_a", [])
+
+    # Navigation: a "back to history list" button at the very top so the
+    # student can return to the /history overview without re-typing the command.
+    await cl.Message(
+        content="**👇 下方为该对话的完整明细**（如需返回历史列表，点击右侧按钮）",
+        author="历史",
+        actions=[
+            cl.Action(
+                name="back_to_history",
+                payload={},
+                label="↩ 返回历史列表",
+                tooltip="返回 /history 历史对话总览",
+                icon="",
+            )
+        ],
+    ).send()
 
     header_lines = [
         f"## 🗂 对话明细  `{conv.get('created_at', '')}`\n",
@@ -468,23 +550,43 @@ async def _render_conversation_detail(conv: dict) -> None:
         if len(body) <= MAX_MSG:
             await cl.Message(content=body, author="历史").send()
         else:
-            chunks = body.split("\n\n---\n\n")
-            buf = head + "\n"
+            # NOTE: `body` already starts with `head` (see assignment above), so
+            # the first chunk carries the Q title. Do NOT prepend `head` again
+            # to `buf` — that would duplicate the title (issue: Q1 header shown
+            # twice in /history output).
+            chunks = _split_long_body(body, MAX_MSG)
+            buf = ""
             for j, chunk in enumerate(chunks):
                 if len(buf) + len(chunk) + 4 > MAX_MSG and buf.strip():
                     await cl.Message(content=buf, author="历史").send()
-                    buf = ""
-                buf = (buf + "\n\n---\n\n" + chunk) if buf else chunk
+                    buf = chunk
+                else:
+                    buf = (buf + "\n\n---\n\n" + chunk) if buf else chunk
             if buf.strip():
                 await cl.Message(content=buf, author="历史").send()
         await asyncio.sleep(0.2)
 
+    # NOTE on "返回顶部": Chainlit's default frontend exposes no scroll-to-top
+    # API and raw JS cannot be injected (unsafe_allow_html=false, no custom
+    # frontend build). True DOM scrolling is therefore not achievable here.
+    # The button re-renders the /history overview instead, which semantically
+    # brings the student back to the TOP of the history flow.
     await cl.Message(
         content=(
             "\n---\n"
             "💡 提示：本对话的所有文件已索引进向量库。\n"
             "- 在左上角菜单中可切换到其它历史对话继续追问。\n"
-            "- 重新上传同一份 PDF 会被自动跳过，无需手动去重。"
+            "- 重新上传同一份 PDF 会被自动跳过，无需手动去重。\n"
+            "- 点击右侧「一键返回顶部」回到历史对话总览。"
         ),
         author="历史",
+        actions=[
+            cl.Action(
+                name="back_to_top",
+                payload={},
+                label="⬆ 一键返回顶部",
+                tooltip="返回 /history 历史总览（Chainlit 不支持真滚动，故回到列表顶部）",
+                icon="",
+            )
+        ],
     ).send()

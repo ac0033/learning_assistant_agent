@@ -65,6 +65,23 @@ def extract_text(response: Any) -> str:
     return str(content)
 
 
+def is_truncated(response: Any) -> bool:
+    """Return True if the LLM stopped due to a token-length cap (truncated).
+
+    Checks the common stop-reason keys across Anthropic / OpenAI-compatible
+    backends exposed via ``response_metadata``. A truncated response means the
+    node's ``max_tokens`` budget was hit mid-generation — the caller should
+    raise the budget or the content will appear cut off.
+    """
+    meta = getattr(response, "response_metadata", None) or {}
+    if not isinstance(meta, dict):
+        return False
+    # Anthropic uses 'stop_reason'; OpenAI-compatible uses 'finish_reason'.
+    reason = meta.get("stop_reason") or meta.get("finish_reason") or ""
+    reason = str(reason).lower()
+    return reason in ("max_tokens", "length", "max-tokens")
+
+
 async def retry_async(
     coro_factory: Callable[[], Any],
     max_attempts: int = 3,

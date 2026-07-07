@@ -10,7 +10,7 @@ from typing import Any
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from ..state import TeachingState
-from ...utils import retry_async, create_llm, extract_text, render_prompt
+from ...utils import retry_async, create_llm, extract_text, is_truncated, render_prompt
 from config.prompts import TEACHING_SYSTEM_PROMPT, SUMMARY_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,9 @@ async def summary_transition_node(state: TeachingState) -> dict[str, Any]:
 
     logger.info("[Summary] Generating summary for: %s", user_query[:80])
 
-    llm = create_llm(temperature=0.5, max_tokens=2000)
+    # 4000-token budget (was 2000): the summary compresses all three prior
+    # parts, so it needs more room to avoid a mid-sentence truncation.
+    llm = create_llm(temperature=0.5, max_tokens=4000)
 
     prompt = render_prompt(
         SUMMARY_PROMPT,
@@ -45,6 +47,13 @@ async def summary_transition_node(state: TeachingState) -> dict[str, Any]:
     ]))
 
     summary = extract_text(response)
+
+    if is_truncated(response):
+        logger.warning(
+            "[Summary] Output truncated at max_tokens=4000 (%d chars) — "
+            "Part ④ may be incomplete; consider raising the budget.",
+            len(summary),
+        )
 
     logger.info("[Summary] Generated %d chars of summary", len(summary))
 
