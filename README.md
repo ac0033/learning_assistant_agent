@@ -34,7 +34,7 @@
 - Python ≥ 3.13
 - [uv](https://docs.astral.sh/uv/) 包管理器
 - 一个 LLM API Key（Anthropic / DeepSeek / OpenRouter 任选其一）
-- 一个 Embedding API Key（推荐 SiliconFlow，有免费额度，支持微信/支付宝）
+- 一个与 `EMBEDDING_PROVIDER` 对应的 Embedding API Key
 
 ### 步骤 / Steps
 
@@ -61,10 +61,10 @@ cp .env.example .env
 ### 启动 Web UI（推荐）
 
 ```bash
-uv run chainlit run src/main.py --port 8000 --host 0.0.0.0
+uv run chainlit run src/main.py --port 8000 --host 127.0.0.1
 ```
 
-浏览器打开 `http://localhost:8000`，拖拽上传课程 PDF，提问即可获得四段式讲解。
+浏览器打开 `http://localhost:8000`，拖拽上传课程 PDF，提问即可获得四段式讲解。以上命令只监听本机；需要局域网访问时再显式配置监听地址。
 
 ### 命令行使用 / CLI
 
